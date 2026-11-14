@@ -16,6 +16,16 @@ pub struct LoadedFile {
     pub doc: Document,
 }
 
+/// A top-level node addressed by file and position among same-named nodes.
+#[derive(Clone)]
+pub struct Item {
+    pub file: PathBuf,
+    pub index: usize,
+    pub node: Node,
+    /// Source text when read, to detect edits made elsewhere.
+    pub src: String,
+}
+
 pub struct ConfigStore {
     pub main: PathBuf,
     pub files: Vec<LoadedFile>,
@@ -137,9 +147,97 @@ impl ConfigStore {
     /// Several node edits applied together; each touched file is validated
     /// and written once.
     pub fn set_nodes(&mut self, edits: &[(&[&str], Option<String>)]) -> Result<(), String> {
+        self.transact(|s| edits.iter().try_for_each(|(p, t)| s.stage(p, t.clone())))
+    }
+
+    /// Change properties of the node at `path` (e.g. `position x=… y=…`),
+    /// creating it if needed; it's removed once it has nothing left.
+    pub fn set_props(&mut self, path: &[&str], props: &[(&str, Option<Value>)]) -> Result<(), String> {
+        self.transact(|s| {
+            let text = match s.find(path) {
+                Some((fi, n)) => kdl::with_props(&s.files[fi].doc.text, n, props),
+                None => {
+                    let leaf = Node {
+                        name: path.last().unwrap().to_string(),
+                        start: 0,
+                        end: 0,
+                        line_start: 0,
+                        entries: Vec::new(),
+                        children: None,
+                    };
+                    kdl::with_props("", &leaf, props)
+                }
+            };
+            s.stage(path, text)
+        })
+    }
+
+    /// Every top-level node called `name` (e.g. `window-rule`), in config order.
+    pub fn items(&self, name: &str) -> Vec<Item> {
+        let mut out = Vec::new();
+        for f in &self.files {
+            for (index, n) in f.doc.find_all(name).enumerate() {
+                out.push(Item { file: f.path.clone(), index, node: n.clone(), src: f.doc.text[n.span()].to_string() });
+            }
+        }
+        out
+    }
+
+    /// Replace (Some) or remove (None) a node returned by `items`. Fails if
+    /// the node changed on disk since it was read.
+    pub fn edit_item(&mut self, item: &Item, text: Option<String>) -> Result<(), String> {
+        self.transact(|s| {
+            let name = item.node.name.clone();
+            let f = s
+                .files
+                .iter_mut()
+                .find(|f| f.path == item.file)
+                .ok_or_else(|| format!("{} is no longer part of the config", item.file.display()))?;
+            let node = f
+                .doc
+                .find_all(&name)
+                .nth(item.index)
+                .filter(|n| f.doc.text[n.span()] == item.src)
+                .cloned()
+                .ok_or("This entry was changed outside the app. Reload from disk and try again.")?;
+            let ierr = |e: kdl::ParseError| format!("internal edit error: {e}");
+            match text {
+                Some(t) => f.doc.splice(node.span(), &t).map_err(ierr),
+                None => {
+                    let r = f.doc.removal_range(&node);
+                    f.doc.splice(r, "").map_err(ierr)
+                }
+            }
+        })
+    }
+
+    /// Add a top-level node next to the last one with the same name, or at
+    /// the end of the main file if there's none yet.
+    pub fn add_item(&mut self, text: &str) -> Result<(), String> {
+        let name = Document::parse(text)
+            .ok()
+            .and_then(|d| d.nodes.first().map(|n| n.name.clone()))
+            .ok_or("internal edit error: bad node text")?;
+        self.transact(|s| {
+            let ierr = |e: kdl::ParseError| format!("internal edit error: {e}");
+            let last = s
+                .files
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(i, f)| f.doc.find_all(&name).last().map(|n| (i, n.clone())));
+            match last {
+                Some((fi, n)) => s.files[fi].doc.insert_after(&n, text).map_err(ierr),
+                None => s.files[0].doc.append_top(text).map_err(ierr),
+            }
+        })
+    }
+
+    /// Run staged edits, then validate and write every changed file once.
+    fn transact(&mut self, f: impl FnOnce(&mut Self) -> Result<(), String>) -> Result<(), String> {
         self.reload()?;
         let originals: Vec<String> = self.files.iter().map(|f| f.doc.text.clone()).collect();
-        let res = edits.iter().try_for_each(|(p, t)| self.stage(p, t.clone()));
+        let res = f(self);
         if let Err(e) = res {
             self.reload()?;
             return Err(e);
@@ -271,7 +369,7 @@ fn nest(parents: &[&str], leaf: &str) -> String {
     let mut text = leaf.to_string();
     for p in parents.iter().rev() {
         let body = text.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n");
-        text = format!("{} {{\n{}\n}}", kdl::ident(p), body);
+        text = format!("{} {{\n{}\n}}", kdl::seg_header(p), body);
     }
     text
 }
@@ -495,6 +593,59 @@ mod tests {
                 assert!(extra.chars().all(|c| c.is_whitespace() || "{}".contains(c) || c.is_alphabetic() || c == '-'), "unexpected leftover:\n{b}");
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh config in target/ with the given text. None without niri.
+    fn scratch(name: &str, text: &str) -> Option<(ConfigStore, PathBuf)> {
+        Command::new("niri").arg("--version").output().ok()?;
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.kdl"), text).unwrap();
+        let mut s = ConfigStore::load_from(dir.join("config.kdl")).unwrap();
+        s.backup_dir = dir.join("backups");
+        Some((s, dir))
+    }
+
+    #[test]
+    fn keyed_paths_and_props() {
+        let Some((mut s, dir)) = scratch("test-keyed", "output \"eDP-1\" {\n    scale 2.0\n}\n") else { return };
+        let out = kdl::keyed("output", "edp-1");
+        // Case-insensitive match on the existing block.
+        assert_eq!(s.value(&[&out, "scale"]), Some(Value::Float(2.0)));
+        s.set_props(&[&out, "position"], &[("x", Some(Value::Int(10))), ("y", Some(Value::Int(0)))]).unwrap();
+        assert_eq!(s.get(&[&out, "position"]).unwrap().prop("x"), Some(&Value::Int(10)));
+        s.set_props(&[&out, "position"], &[("x", Some(Value::Int(20)))]).unwrap();
+        assert_eq!(s.get(&[&out, "position"]).unwrap().prop("y"), Some(&Value::Int(0)));
+        // A block for a new output is created with its name.
+        let hdmi = kdl::keyed("output", "HDMI-A-1");
+        s.set_value(&[&hdmi, "transform"], Some(Value::String("90".into()))).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.kdl")).unwrap();
+        assert!(text.contains("output \"HDMI-A-1\" {\n    transform \"90\"\n}"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn items_add_edit_remove() {
+        let text = "spawn-at-startup \"a\"\n// keep me\nspawn-at-startup \"b\"\n\nbinds {\n}\n";
+        let Some((mut s, dir)) = scratch("test-items", text) else { return };
+        let items = s.items("spawn-at-startup");
+        assert_eq!(items.len(), 2);
+        s.add_item("spawn-sh-at-startup \"c | d\"").unwrap();
+        s.add_item("spawn-at-startup \"e\"").unwrap();
+        let got = std::fs::read_to_string(dir.join("config.kdl")).unwrap();
+        assert!(got.starts_with("spawn-at-startup \"a\"\n// keep me\nspawn-at-startup \"b\"\nspawn-at-startup \"e\"\n"), "{got}");
+        assert!(got.ends_with("spawn-sh-at-startup \"c | d\"\n"), "{got}");
+        // Edit by position; stale source is refused.
+        let b = s.items("spawn-at-startup")[1].clone();
+        s.edit_item(&b, Some("spawn-at-startup \"B\"".into())).unwrap();
+        assert!(s.edit_item(&b, None).is_err(), "stale item must be refused");
+        let b = s.items("spawn-at-startup")[1].clone();
+        s.edit_item(&b, None).unwrap();
+        assert_eq!(s.items("spawn-at-startup").len(), 2);
+        // Invalid nodes are rejected by niri.
+        assert!(s.add_item("window-rule { bogus-thing true; }").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

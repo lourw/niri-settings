@@ -246,6 +246,21 @@ impl Document {
         self.splice(range, &text)
     }
 
+    /// Insert a top-level node on the line after `node`, at the same indent.
+    pub fn insert_after(&mut self, node: &Node, node_text: &str) -> Result<(), ParseError> {
+        let b = self.text.as_bytes();
+        let mut end = node.end;
+        while end < b.len() && b[end] != b'\n' {
+            end += 1;
+        }
+        let indent = line_indent(&self.text, node.start);
+        let body = indent_block(node_text, &indent);
+        let mut text = self.text.clone();
+        text.insert_str(end, &format!("\n{body}"));
+        *self = Document::parse(text)?;
+        Ok(())
+    }
+
     /// Append a top-level node at the end of the document.
     pub fn append_top(&mut self, node_text: &str) -> Result<(), ParseError> {
         let mut text = self.text.clone();
@@ -262,10 +277,83 @@ impl Document {
     }
 }
 
+/// Separates a node name from its first argument in a keyed path segment,
+/// e.g. `output "eDP-1"` is addressed as `keyed("output", "eDP-1")`.
+pub const KEY_SEP: char = '\u{1f}';
+
+/// Path segment matching a node by name and first string argument.
+pub fn keyed(name: &str, arg: &str) -> String {
+    format!("{name}{KEY_SEP}{arg}")
+}
+
+/// Does `n` match the path segment `seg` (plain name or `keyed`)?
+pub fn seg_matches(n: &Node, seg: &str) -> bool {
+    match seg.split_once(KEY_SEP) {
+        None => n.name == seg,
+        Some((name, arg)) => {
+            n.name == name && n.arg(0).and_then(Value::as_str).is_some_and(|a| a.eq_ignore_ascii_case(arg))
+        }
+    }
+}
+
+/// KDL header for a path segment: `name` or `name "arg"`.
+pub fn seg_header(seg: &str) -> String {
+    match seg.split_once(KEY_SEP) {
+        None => ident(seg),
+        Some((name, arg)) => format!("{} {}", ident(name), quote(arg)),
+    }
+}
+
+/// String literal for a regex: a raw string when escapes would get in the way.
+pub fn regex_lit(s: &str) -> String {
+    if !s.contains('\\') && !s.contains('"') {
+        return quote(s);
+    }
+    let mut hashes = String::from("#");
+    while s.contains(&format!("\"{hashes}")) {
+        hashes.push('#');
+    }
+    format!("r{hashes}\"{s}\"{hashes}")
+}
+
+/// Rebuild a node's text with its properties changed: `Some` sets (in place,
+/// or appended), `None` removes. Arguments and the children block are kept.
+/// Returns None if the node would end up with no entries and no children.
+pub fn with_props(text: &str, node: &Node, props: &[(&str, Option<Value>)]) -> Option<String> {
+    let mut entries: Vec<Entry> = node.entries.clone();
+    for (k, v) in props {
+        match v {
+            Some(v) => match entries.iter_mut().rev().find(|e| e.key.as_deref() == Some(*k)) {
+                Some(e) => e.value = v.clone(),
+                None => entries.push(Entry { key: Some(k.to_string()), value: v.clone() }),
+            },
+            None => entries.retain(|e| e.key.as_deref() != Some(*k)),
+        }
+    }
+    let children = node.children.as_ref().map(|c| &text[c.open..=c.close]);
+    if entries.is_empty() && children.is_none() {
+        return None;
+    }
+    let mut out = ident(&node.name);
+    for e in &entries {
+        out.push(' ');
+        if let Some(k) = &e.key {
+            out.push_str(&ident(k));
+            out.push('=');
+        }
+        out.push_str(&e.value.to_kdl());
+    }
+    if let Some(c) = children {
+        out.push(' ');
+        out.push_str(c);
+    }
+    Some(out)
+}
+
 fn find_in<'a>(nodes: &'a [Node], path: &[&str]) -> Option<&'a Node> {
     let (first, rest) = path.split_first()?;
     for n in nodes.iter().rev() {
-        if n.name == *first {
+        if seg_matches(n, first) {
             if rest.is_empty() {
                 return Some(n);
             }

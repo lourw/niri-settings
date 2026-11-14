@@ -1,4 +1,5 @@
 pub mod appearance;
+pub mod displays;
 pub mod fingerprint;
 pub mod general;
 pub mod keybinds;

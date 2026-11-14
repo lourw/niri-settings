@@ -2,6 +2,7 @@
 //! store and writes on change.
 
 use super::{Ctx, Path, refs};
+use crate::config::ConfigStore;
 use crate::kdl::Value;
 use adw::prelude::*;
 use gtk::glib;
@@ -23,6 +24,34 @@ impl Debouncer {
             f();
         });
         *self.0.borrow_mut() = Some(id);
+    }
+}
+
+/// What a value row edits: a node's first argument, or one property of it.
+#[derive(Clone)]
+pub enum Target {
+    Arg(Path),
+    Prop(Path, &'static str),
+}
+
+impl From<Path> for Target {
+    fn from(p: Path) -> Self {
+        Target::Arg(p)
+    }
+}
+
+impl Target {
+    pub fn read(&self, s: &ConfigStore) -> Option<Value> {
+        match self {
+            Target::Arg(p) => s.value(&refs(p)),
+            Target::Prop(p, k) => s.get(&refs(p)).and_then(|n| n.prop(k).cloned()),
+        }
+    }
+    pub fn write(&self, s: &mut ConfigStore, v: Option<Value>) -> Result<(), String> {
+        match self {
+            Target::Arg(p) => s.set_value(&refs(p), v),
+            Target::Prop(p, k) => s.set_props(&refs(p), &[(k, v)]),
+        }
     }
 }
 
@@ -183,12 +212,13 @@ fn num_value(spec: &NumSpec, v: f64) -> Value {
 }
 
 /// Numeric value with a reset-to-default button.
-pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: Path, spec: NumSpec) -> adw::SpinRow {
+pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: impl Into<Target>, spec: NumSpec) -> adw::SpinRow {
     let row = adw::SpinRow::with_range(spec.min, spec.max, spec.step);
     row.set_title(title);
     row.set_subtitle(subtitle);
     row.set_digits(spec.digits);
-    let current = ctx.store.borrow().value(&refs(&p)).and_then(|v| v.as_f64());
+    let p: Target = p.into();
+    let current = p.read(&ctx.store.borrow()).and_then(|v| v.as_f64());
     row.set_value(current.unwrap_or(spec.default));
 
     let reset = reset_button("Reset to default");
@@ -214,7 +244,7 @@ pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: Path, spec: NumSpec) -> a
             let val = (!(spec.default == 0.0 && row.value() == 0.0)).then(|| num_value(&spec, row.value()));
             deb.run(400, move || {
                 let set = val.is_some();
-                ctx.apply(move |s| s.set_value(&refs(&p), val), move |ok| {
+                ctx.apply(move |s| p.write(s, val), move |ok| {
                     if ok {
                         reset.set_visible(set);
                     }
@@ -228,7 +258,7 @@ pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: Path, spec: NumSpec) -> a
         reset.connect_clicked(move |btn| {
             let p = p.clone();
             let (row2, guard, btn) = (row2.clone(), guard.clone(), btn.clone());
-            ctx.apply(move |s| s.set_value(&refs(&p), None), move |ok| {
+            ctx.apply(move |s| p.write(s, None), move |ok| {
                 if ok {
                     guard.set(true);
                     row2.set_value(default);
@@ -438,9 +468,10 @@ pub fn rgba_hex(c: &gtk::gdk::RGBA) -> String {
 }
 
 /// A CSS color string with a color picker and reset-to-default button.
-pub fn color(ctx: &Ctx, title: &str, subtitle: &str, p: Path, default: &str) -> adw::ActionRow {
+pub fn color(ctx: &Ctx, title: &str, subtitle: &str, p: impl Into<Target>, default: &str) -> adw::ActionRow {
     let row = adw::ActionRow::builder().title(title).subtitle(subtitle).build();
-    let current = ctx.store.borrow().string(&refs(&p));
+    let p: Target = p.into();
+    let current = p.read(&ctx.store.borrow()).and_then(|v| v.as_str().map(String::from));
     let parse = |s: &str| match s.trim() {
         t if t.eq_ignore_ascii_case("transparent") => Some(gtk::gdk::RGBA::TRANSPARENT),
         t => gtk::gdk::RGBA::parse(t).ok(),
@@ -473,7 +504,7 @@ pub fn color(ctx: &Ctx, title: &str, subtitle: &str, p: Path, default: &str) -> 
             let hex = rgba_hex(&b.rgba());
             let (ctx, p, reset) = (ctx.clone(), p.clone(), reset.clone());
             deb.run(300, move || {
-                ctx.apply(move |s| s.set_value(&refs(&p), Some(Value::String(hex))), move |ok| {
+                ctx.apply(move |s| p.write(s, Some(Value::String(hex))), move |ok| {
                     if ok {
                         reset.set_visible(true);
                     }
@@ -486,7 +517,7 @@ pub fn color(ctx: &Ctx, title: &str, subtitle: &str, p: Path, default: &str) -> 
         reset.connect_clicked(move |btn| {
             let p = p.clone();
             let (button, guard, btn) = (button.clone(), guard.clone(), btn.clone());
-            ctx.apply(move |s| s.set_value(&refs(&p), None), move |ok| {
+            ctx.apply(move |s| p.write(s, None), move |ok| {
                 if ok {
                     guard.set(true);
                     button.set_rgba(&default_rgba);
