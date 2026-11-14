@@ -6,6 +6,7 @@ pub mod keybinds;
 pub mod keyboard;
 pub mod layout;
 pub mod pointer;
+pub mod startup;
 pub mod widgets;
 
 use crate::config::ConfigStore;

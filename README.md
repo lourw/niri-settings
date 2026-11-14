@@ -12,6 +12,7 @@ Pages:
 - **Layout**: new column width, preset widths/heights, centering, tabbed columns, gaps, struts
 - **Appearance**: focus ring, border, shadow, colors, insert hint, animations, overview, hotkey overlay
 - **Focus & Cursor**: focus behaviour, mod key, hot corner, middle-click paste, cursor theme
+- **Startup Apps**: programs and shell commands launched with niri
 - **Shortcuts**: view and edit keybinds
 - **Fingerprint**: enroll and remove fingerprints through `fprintd`
 
