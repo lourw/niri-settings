@@ -28,7 +28,11 @@ fi
 
 cargo build --release
 install -Dm755 target/release/niri-settings "$BIN"
-install -Dm644 "data/$APP_ID.desktop" "$DESKTOP"
+# Use an absolute Exec path: launchers spawned by the compositor often don't
+# have $PREFIX/bin (e.g. ~/.local/bin) on their PATH.
+mkdir -p "$(dirname "$DESKTOP")"
+sed "s|^Exec=niri-settings|Exec=$BIN|" "data/$APP_ID.desktop" > "$DESKTOP"
+chmod 644 "$DESKTOP"
 install -Dm644 "data/icons/$APP_ID.svg" "$ICON"
 refresh_caches
 
