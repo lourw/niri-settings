@@ -8,7 +8,7 @@ Pages:
 
 - **Keyboard**
 - **Mouse**, **Touchpad**, **Trackpoint**, **Trackball**
-- **Displays**: resolution, refresh rate, scale, rotation, position, VRR, per-display colors
+- **Displays**: drag-to-arrange layout, one tab per display with resolution, refresh rate, scale, rotation, position, VRR, per-display colors
 - **Layout**: new column width, preset widths/heights, centering, tabbed columns, gaps, struts
 - **Appearance**: focus ring and border (colors or gradients), shadow, colors, insert hint, per-animation springs and easing, overview, hotkey overlay
 - **Workspaces**: named workspaces, their order and which display they open on
