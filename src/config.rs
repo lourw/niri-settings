@@ -711,6 +711,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The node shapes the extra Appearance rows write are accepted.
+    #[test]
+    fn appearance_extra_edits() {
+        let Some((mut s, dir)) = scratch("test-appearance", "") else { return };
+        let g = ["layout", "focus-ring", "active-gradient"];
+        s.set_node(&g, Some("active-gradient from=\"#7fc8ff\" to=\"#7fc8ff\" angle=180".into())).unwrap();
+        s.set_props(&g, &[("to", Some(Value::String("#ff0000".into())))]).unwrap();
+        s.set_props(&g, &[("relative-to", Some(Value::String("workspace-view".into())))]).unwrap();
+        s.set_props(&g, &[("angle", Some(Value::Int(45)))]).unwrap();
+        s.set_props(&["layout", "shadow", "offset"], &[("y", Some(Value::Int(8)))]).unwrap();
+        s.set_props(&["overview", "workspace-shadow", "offset"], &[("x", Some(Value::Int(2)))]).unwrap();
+        s.set_props(&["layout", "tab-indicator", "length"], &[("total-proportion", Some(Value::Float(0.7)))]).unwrap();
+        s.set_value(&["layout", "tab-indicator", "active-color"], Some(Value::String("#ff0000".into()))).unwrap();
+        let a = ["animations", "window-open"];
+        s.set_nodes(&[
+            (&[a[0], a[1], "spring"], Some("spring damping-ratio=0.8 stiffness=600 epsilon=0.0001".into())),
+            (&[a[0], a[1], "duration-ms"], None),
+            (&[a[0], a[1], "curve"], None),
+        ])
+        .unwrap();
+        s.set_props(&[a[0], a[1], "spring"], &[("stiffness", Some(Value::Int(700)))]).unwrap();
+        s.set_nodes(&[
+            (&[a[0], a[1], "spring"], None),
+            (&[a[0], a[1], "duration-ms"], Some("duration-ms 300".into())),
+            (&[a[0], a[1], "curve"], Some("curve \"linear\"".into())),
+        ])
+        .unwrap();
+        s.set_flag(&["animations", "screenshot-ui-open", "off"], true).unwrap();
+        s.set_node(&g, None).unwrap();
+        assert!(s.get(&g).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn copy_dir(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
         for e in std::fs::read_dir(from).unwrap().flatten() {

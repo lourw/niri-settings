@@ -47,6 +47,14 @@ impl Target {
             Target::Prop(p, k) => s.get(&refs(p)).and_then(|n| n.prop(k).cloned()),
         }
     }
+    /// Properties are reset by writing the default explicitly: removing one
+    /// can leave the node invalid (e.g. a `spring` missing `stiffness`).
+    fn reset_value(&self, default: Value) -> Option<Value> {
+        match self {
+            Target::Arg(_) => None,
+            Target::Prop(..) => Some(default),
+        }
+    }
     pub fn write(&self, s: &mut ConfigStore, v: Option<Value>) -> Result<(), String> {
         match self {
             Target::Arg(p) => s.set_value(&refs(p), v),
@@ -228,6 +236,7 @@ pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: impl Into<Target>, spec: 
     let guard = Rc::new(Cell::new(false));
     let deb = Debouncer::default();
     let default = spec.default;
+    let reset_val = p.reset_value(num_value(&spec, default));
     {
         let ctx = ctx.clone();
         let p = p.clone();
@@ -241,7 +250,8 @@ pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: impl Into<Target>, spec: 
             let p = p.clone();
             let reset = reset.clone();
             // A zero default means "unset" (e.g. no auto-hide); don't write 0.
-            let val = (!(spec.default == 0.0 && row.value() == 0.0)).then(|| num_value(&spec, row.value()));
+            let unset = spec.default == 0.0 && row.value() == 0.0 && matches!(p, Target::Arg(_));
+            let val = (!unset).then(|| num_value(&spec, row.value()));
             deb.run(400, move || {
                 let set = val.is_some();
                 ctx.apply(move |s| p.write(s, val), move |ok| {
@@ -258,7 +268,8 @@ pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: impl Into<Target>, spec: 
         reset.connect_clicked(move |btn| {
             let p = p.clone();
             let (row2, guard, btn) = (row2.clone(), guard.clone(), btn.clone());
-            ctx.apply(move |s| p.write(s, None), move |ok| {
+            let v = reset_val.clone();
+            ctx.apply(move |s| p.write(s, v), move |ok| {
                 if ok {
                     guard.set(true);
                     row2.set_value(default);
@@ -490,6 +501,7 @@ pub fn color(ctx: &Ctx, title: &str, subtitle: &str, p: impl Into<Target>, defau
     row.add_suffix(&reset);
     row.set_activatable_widget(Some(&button));
 
+    let reset_val = p.reset_value(Value::String(default.to_string()));
     let guard = Rc::new(Cell::new(false));
     let deb = Debouncer::default();
     {
@@ -517,7 +529,8 @@ pub fn color(ctx: &Ctx, title: &str, subtitle: &str, p: impl Into<Target>, defau
         reset.connect_clicked(move |btn| {
             let p = p.clone();
             let (button, guard, btn) = (button.clone(), guard.clone(), btn.clone());
-            ctx.apply(move |s| p.write(s, None), move |ok| {
+            let v = reset_val.clone();
+            ctx.apply(move |s| p.write(s, v), move |ok| {
                 if ok {
                     guard.set(true);
                     button.set_rgba(&default_rgba);

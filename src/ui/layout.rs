@@ -265,6 +265,24 @@ fn tabs(ctx: &Ctx) -> adw::PreferencesGroup {
         path(&["layout", "tab-indicator", "corner-radius"]),
         num(0.0, 0.0),
     ));
+    ind.add_row(&widgets::spin(
+        ctx,
+        "Length",
+        "Fraction of the column the whole bar of tabs spans",
+        widgets::Target::Prop(path(&["layout", "tab-indicator", "length"]), "total-proportion"),
+        NumSpec { min: 0.05, max: 1.0, step: 0.05, digits: 2, float: true, default: 0.5 },
+    ));
+    for (label, kind, default) in
+        [("Active color", "active", "#7fc8ff"), ("Inactive color", "inactive", "#505050"), ("Urgent color", "urgent", "#9b0000")]
+    {
+        ind.add_row(&widgets::color(
+            ctx,
+            label,
+            "Defaults to the focus ring color",
+            path(&["layout", "tab-indicator", &format!("{kind}-color")]),
+            default,
+        ));
+    }
     g.add(&ind);
     g
 }
