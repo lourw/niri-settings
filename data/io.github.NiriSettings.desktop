@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Niri Settings
+GenericName=Compositor Settings
+Comment=Configure the niri Wayland compositor
+Exec=niri-settings
+Icon=io.github.NiriSettings
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+Keywords=niri;wayland;compositor;keyboard;pointer;keybinds;
+StartupNotify=true
+StartupWMClass=io.github.NiriSettings
