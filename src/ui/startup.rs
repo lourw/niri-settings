@@ -68,9 +68,9 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
 
 impl State {
     fn rebuild(self: &Rc<Self>) {
-        if let Some(g) = self.group.borrow_mut().take() {
-            self.page.remove(&g);
-        }
+        // The old list is removed only after the new one is added, so the
+        // page never shrinks and the scroll position is kept.
+        let old = self.group.borrow_mut().take();
         let g = widgets::group(
             "Startup applications",
             "Started once when niri launches. Changes take effect the next time you log in.",
@@ -116,6 +116,9 @@ impl State {
         }
         g.add(&add_cmd);
         self.page.add(&g);
+        if let Some(old) = old {
+            self.page.remove(&old);
+        }
         *self.group.borrow_mut() = Some(g);
     }
 

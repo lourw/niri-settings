@@ -48,9 +48,9 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
 
 impl State {
     fn rebuild(self: &Rc<Self>) {
-        if let Some(g) = self.group.borrow_mut().take() {
-            self.page.remove(&g);
-        }
+        // The old list is removed only after the new one is added, so the
+        // page never shrinks and the scroll position is kept.
+        let old = self.group.borrow_mut().take();
         let g = widgets::group(
             "Named workspaces",
             "Always present, in this order, above dynamic workspaces. Use their names in window rules and shortcuts.",
@@ -67,6 +67,9 @@ impl State {
         add.connect_apply(move |e| st.add(e.text().trim()));
         g.add(&add);
         self.page.add(&g);
+        if let Some(old) = old {
+            self.page.remove(&old);
+        }
         *self.group.borrow_mut() = Some(g);
     }
 

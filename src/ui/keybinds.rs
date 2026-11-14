@@ -263,6 +263,8 @@ pub fn page(ctx: &Ctx) -> gtk::Widget {
         new_group,
         reopen: RefCell::new(None),
         new_row: RefCell::new(None),
+        parts: RefCell::default(),
+        filling: Cell::new(false),
         generation: Cell::new(0),
     });
     state.rebuild();
@@ -278,6 +280,39 @@ pub fn page(ctx: &Ctx) -> gtk::Widget {
     root.upcast()
 }
 
+/// A shortcut's row, kept so a save can update it without rebuilding the
+/// list (which would jump the page back to the top).
+struct RowParts {
+    row: adw::ExpanderRow,
+    /// The bind as last saved; None for a new, unsaved shortcut.
+    bind: RefCell<Option<Bind>>,
+    keycaps: RefCell<Option<gtk::Box>>,
+    /// Rows the form added, and signal handlers it connected on `row`.
+    form: RefCell<Vec<gtk::Widget>>,
+    handlers: RefCell<Vec<glib::SignalHandlerId>>,
+}
+
+impl RowParts {
+    fn new(row: adw::ExpanderRow, bind: Option<Bind>) -> Rc<Self> {
+        Rc::new(RowParts {
+            row,
+            bind: RefCell::new(bind),
+            keycaps: RefCell::new(None),
+            form: RefCell::default(),
+            handlers: RefCell::default(),
+        })
+    }
+
+    fn clear_form(&self) {
+        for w in self.form.borrow_mut().drain(..) {
+            self.row.remove(&w);
+        }
+        for h in self.handlers.borrow_mut().drain(..) {
+            self.row.disconnect(h);
+        }
+    }
+}
+
 struct PageState {
     ctx: Ctx,
     prefs: adw::PreferencesPage,
@@ -287,13 +322,18 @@ struct PageState {
     new_group: adw::PreferencesGroup,
     /// Key of a shortcut to show expanded after the next rebuild.
     reopen: RefCell<Option<String>>,
-    new_row: RefCell<Option<adw::ExpanderRow>>,
+    new_row: RefCell<Option<Rc<RowParts>>>,
+    /// Every shortcut row on the page.
+    parts: RefCell<Vec<Rc<RowParts>>>,
+    /// A chunked fill is still adding rows.
+    filling: Cell<bool>,
     /// Bumped on every rebuild so a still-running chunked fill stops.
     generation: Cell<u64>,
 }
 
 impl PageState {
     fn rebuild(self: &Rc<Self>) {
+        self.parts.borrow_mut().clear();
         for (g, _) in self.groups.borrow_mut().drain(..) {
             self.prefs.remove(&g);
         }
@@ -313,6 +353,7 @@ impl PageState {
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         let binds = Rc::new(data.binds);
+        self.filling.set(true);
         let next = Rc::new(Cell::new(0usize));
         let last_section: Rc<RefCell<Option<String>>> = Rc::default();
         let step = {
@@ -333,7 +374,12 @@ impl PageState {
                     },
                 );
                 next.set(end);
-                if end == binds.len() { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+                if end == binds.len() {
+                    st.filling.set(false);
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
             }
         };
         if step() == glib::ControlFlow::Continue {
@@ -350,45 +396,122 @@ impl PageState {
             self.groups.borrow_mut().push((g, Vec::new()));
             *last_section = Some(b.section.clone());
         }
-        let row = adw::ExpanderRow::builder().title(glib::markup_escape_text(&b.title())).build();
-        if b.prop("hotkey-overlay-title").is_some() {
-            row.set_subtitle(&glib::markup_escape_text(&b.action));
-            row.set_subtitle_lines(1);
-        }
-        row.add_suffix(&keycaps(&b.key));
-        let st = self.clone();
-        let bind = b.clone();
-        super::widgets::lazy_rows(&row, move |row| edit_form(&st, row, Some(bind)));
+        let row = adw::ExpanderRow::builder().build();
+        row.set_subtitle_lines(1);
+        let parts = RowParts::new(row.clone(), Some(b.clone()));
+        self.set_header(&parts, b);
+        let (st, p) = (self.clone(), parts.clone());
+        super::widgets::lazy_rows(&row, move |_| {
+            let bind = p.bind.borrow().clone();
+            edit_form(&st, &p, bind);
+        });
         if self.reopen.borrow().as_deref() == Some(b.key.as_str()) {
             self.reopen.replace(None);
             row.set_expanded(true);
         }
-        let hay = format!("{} {} {}", b.key, b.title(), b.action).to_lowercase();
+        let hay = hay_for(b);
         let mut groups = self.groups.borrow_mut();
         let g = groups.last_mut().unwrap();
         g.0.add(&row);
         g.1.push((row, hay));
+        self.parts.borrow_mut().push(parts);
+    }
+
+    /// Title, subtitle and keycaps of a shortcut row.
+    fn set_header(&self, parts: &RowParts, b: &Bind) {
+        parts.row.set_title(&glib::markup_escape_text(&b.title()));
+        let sub = if b.prop("hotkey-overlay-title").is_some() { b.action.as_str() } else { "" };
+        parts.row.set_subtitle(&glib::markup_escape_text(sub));
+        if let Some(old) = parts.keycaps.borrow_mut().take() {
+            parts.row.remove(&old);
+        }
+        let caps = keycaps(&b.key);
+        parts.row.add_suffix(&caps);
+        *parts.keycaps.borrow_mut() = Some(caps);
+    }
+
+    fn find_parts(&self, key: &str) -> Option<Rc<RowParts>> {
+        self.parts.borrow().iter().find(|p| p.bind.borrow().as_ref().is_some_and(|b| b.key == key)).cloned()
+    }
+
+    /// Take a row off the page.
+    fn remove_parts(&self, parts: &Rc<RowParts>) {
+        for (g, rows) in self.groups.borrow_mut().iter_mut() {
+            if let Some(i) = rows.iter().position(|(r, _)| *r == parts.row) {
+                g.remove(&parts.row);
+                rows.remove(i);
+            }
+        }
+        self.parts.borrow_mut().retain(|p| !Rc::ptr_eq(p, parts));
+        self.filter();
+    }
+
+    /// The bind now in the config for `key`.
+    fn bind_for(&self, key: &str) -> Option<Bind> {
+        collect(&self.ctx).binds.into_iter().find(|b| b.key == key)
+    }
+
+    /// Show `b` (as now saved) in an existing row and rebuild its form.
+    fn refresh(self: &Rc<Self>, parts: &Rc<RowParts>, b: Bind) {
+        self.set_header(parts, &b);
+        for (_, rows) in self.groups.borrow_mut().iter_mut() {
+            if let Some(r) = rows.iter_mut().find(|(r, _)| *r == parts.row) {
+                r.1 = hay_for(&b);
+            }
+        }
+        *parts.bind.borrow_mut() = Some(b.clone());
+        let built = !parts.form.borrow().is_empty();
+        parts.clear_form();
+        if built {
+            edit_form(self, parts, Some(b));
+        }
+    }
+
+    /// After a save: update rows in place instead of rebuilding the list.
+    fn after_save(self: &Rc<Self>, parts: &Rc<RowParts>, key: &str, replaced: Option<String>) {
+        if let Some(p) = replaced.as_deref().and_then(|k| self.find_parts(k)) {
+            if !Rc::ptr_eq(&p, parts) {
+                self.remove_parts(&p);
+            }
+        }
+        let Some(b) = self.bind_for(key) else {
+            self.rebuild();
+            return;
+        };
+        if parts.bind.borrow().is_some() {
+            self.refresh(parts, b);
+            return;
+        }
+        // A new shortcut: it was appended to the config, so append its row.
+        self.close_new();
+        if self.filling.get() || self.groups.borrow().is_empty() {
+            self.rebuild();
+            return;
+        }
+        self.add_bind_row(&b, &mut Some(b.section.clone()));
+        self.filter();
     }
 
     /// Show an unsaved shortcut, opened for editing, at the top.
     fn add_new(self: &Rc<Self>) {
-        if let Some(row) = self.new_row.borrow().clone() {
-            row.set_expanded(true);
+        if let Some(p) = self.new_row.borrow().clone() {
+            p.row.set_expanded(true);
             return;
         }
         let row = adw::ExpanderRow::builder().title("New shortcut").subtitle("Not saved yet").build();
-        let st = self.clone();
-        super::widgets::lazy_rows(&row, move |row| edit_form(&st, row, None));
+        let parts = RowParts::new(row.clone(), None);
+        let (st, p) = (self.clone(), parts.clone());
+        super::widgets::lazy_rows(&row, move |_| edit_form(&st, &p, None));
         self.new_group.add(&row);
         self.new_group.set_visible(true);
         row.set_expanded(true);
-        *self.new_row.borrow_mut() = Some(row);
+        *self.new_row.borrow_mut() = Some(parts);
     }
 
     /// Remove the unsaved new shortcut, if any.
     fn close_new(&self) {
-        if let Some(row) = self.new_row.borrow_mut().take() {
-            self.new_group.remove(&row);
+        if let Some(p) = self.new_row.borrow_mut().take() {
+            self.new_group.remove(&p.row);
         }
         self.new_group.set_visible(false);
     }
@@ -406,6 +529,10 @@ impl PageState {
             g.set_visible(any);
         }
     }
+}
+
+fn hay_for(b: &Bind) -> String {
+    format!("{} {} {}", b.key, b.title(), b.action).to_lowercase()
 }
 
 pub fn keycaps(key: &str) -> gtk::Box {
@@ -479,8 +606,14 @@ fn quote_args(argv: &[String]) -> String {
 }
 
 /// The editing form inside a shortcut's expander (None = a new shortcut).
-fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bind>) {
+fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>) {
     let ctx = &state.ctx;
+    let row = &parts.row;
+    // Rows go through `add` so a refresh can remove them again.
+    let add = |w: gtk::Widget| {
+        row.add_row(&w);
+        parts.form.borrow_mut().push(w);
+    };
     let is_new = existing.is_none();
     let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).build();
     let discard = gtk::Button::with_label("Discard");
@@ -514,8 +647,8 @@ fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bin
         .margin_end(12)
         .visible(false)
         .build();
-    row.add_row(&keys);
-    row.add_row(&conflict);
+    add(keys.clone().upcast());
+    add(conflict.clone().upcast());
 
     // ── Action ──
     let mut labels: Vec<String> = ACTIONS
@@ -537,8 +670,8 @@ fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bin
         "string",
     )));
     let arg_row = adw::EntryRow::builder().title("Command").build();
-    row.add_row(&action_row);
-    row.add_row(&arg_row);
+    add(action_row.clone().upcast());
+    add(arg_row.clone().upcast());
 
     // ── Options ──
     let title_row = adw::EntryRow::builder().title("Title in hotkey overlay (optional)").build();
@@ -552,11 +685,11 @@ fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bin
     let cooldown = adw::SpinRow::with_range(0.0, 10_000.0, 10.0);
     cooldown.set_title("Cooldown (ms)");
     cooldown.set_subtitle("Minimum time between triggers; useful for scroll wheel binds");
-    row.add_row(&title_row);
-    row.add_row(&locked);
-    row.add_row(&repeat);
-    row.add_row(&inhibit);
-    row.add_row(&cooldown);
+    add(title_row.clone().upcast());
+    add(locked.clone().upcast());
+    add(repeat.clone().upcast());
+    add(inhibit.clone().upcast());
+    add(cooldown.clone().upcast());
 
     // Fill from the existing bind.
     let custom_idx = ACTIONS.len() as u32;
@@ -766,13 +899,14 @@ fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bin
     {
         // Stop recording when the row is collapsed or goes away.
         let stop = stop_recording.clone();
-        row.connect_expanded_notify(move |r| {
+        let h1 = row.connect_expanded_notify(move |r| {
             if !r.is_expanded() {
                 stop(true);
             }
         });
         let stop = stop_recording.clone();
-        row.connect_unmap(move |_| stop(true));
+        let h2 = row.connect_unmap(move |_| stop(true));
+        parts.handlers.borrow_mut().extend([h1, h2]);
     }
 
     // ── Actions ──
@@ -788,34 +922,37 @@ fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bin
         actions.append(&discard);
     }
     actions.append(&save);
-    row.add_row(&actions);
+    add(actions.clone().upcast());
     {
-        let st = state.clone();
+        let (st, parts) = (state.clone(), parts.clone());
         let key = existing.as_ref().map(|b| b.key.clone());
         remove.connect_clicked(move |_| match key.clone() {
             None => st.close_new(),
             Some(key) => {
-                let st2 = st.clone();
+                let (st2, parts) = (st.clone(), parts.clone());
                 st.ctx.apply(move |s| s.set_node(&["binds", &key], None), move |ok| {
                     if ok {
                         st2.ctx.toast("Shortcut deleted");
-                        st2.rebuild();
+                        st2.remove_parts(&parts);
                     }
                 });
             }
         });
     }
     {
-        // Discard: rebuild, keeping this shortcut open with its saved values.
-        let st = state.clone();
-        let key = existing.as_ref().map(|b| b.key.clone());
+        // Discard: rebuild just this form from the saved bind.
+        let (st, parts) = (state.clone(), parts.clone());
         discard.connect_clicked(move |_| {
-            *st.reopen.borrow_mut() = key.clone();
-            st.rebuild();
+            let b = parts.bind.borrow().clone();
+            match b {
+                Some(b) => st.refresh(&parts, b),
+                None => st.close_new(),
+            }
         });
     }
     {
         let st = state.clone();
+        let parts = parts.clone();
         save.connect_clicked(move |_| {
             let key = keys.text().trim().to_string();
             if key.is_empty() {
@@ -896,12 +1033,14 @@ fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bin
             let conflict = find_conflict(&key);
             let do_save = {
                 let st = st.clone();
+                let parts = parts.clone();
                 let existing_key = existing.as_ref().map(|b| b.key.clone());
                 let key = key.clone();
                 move |conflict: Option<Bind>| {
                     let (existing_key, key, text) = (existing_key.clone(), key.clone(), text.clone());
-                    let st2 = st.clone();
+                    let (st2, parts) = (st.clone(), parts.clone());
                     let saved_key = key.clone();
+                    let replaced = conflict.as_ref().map(|c| c.key.clone());
                     st.ctx.apply(move |s| {
                         let mut edits: Vec<(Vec<&str>, Option<String>)> = Vec::new();
                         if let Some(c) = &conflict {
@@ -916,9 +1055,7 @@ fn edit_form(state: &Rc<PageState>, row: &adw::ExpanderRow, existing: Option<Bin
                     }, move |ok| {
                         if ok {
                             st2.ctx.toast("Shortcut saved");
-                            st2.close_new();
-                            *st2.reopen.borrow_mut() = Some(saved_key);
-                            st2.rebuild();
+                            st2.after_save(&parts, &saved_key, replaced);
                         }
                     });
                 }
