@@ -1,0 +1,5 @@
+# Share one build directory across worktrees of this repo so git worktrees
+# don't each rebuild the (large) GTK dependency stack from scratch.
+# Concurrent builds lock the directory rather than corrupt it.
+[build]
+target-dir = "/home/lourw/.cache/cargo-targets/niri-settings"
