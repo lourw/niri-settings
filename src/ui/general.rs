@@ -68,6 +68,7 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         path(&["clipboard", "disable-primary"]),
     ));
     page.add(&desktop);
+    page.add(&recent_windows(ctx));
 
     let cursor = widgets::group("Cursor", "");
     cursor.add(&cursor_theme(ctx));
@@ -94,6 +95,58 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
     page.add(&cursor);
 
     page
+}
+
+/// The Alt-Tab switcher (`recent-windows`).
+fn recent_windows(ctx: &Ctx) -> adw::PreferencesGroup {
+    let g = widgets::group("Window switcher", "Recently used windows, shown with Alt+Tab");
+    let rw = |leaf: &[&str]| {
+        let mut p = vec!["recent-windows"];
+        p.extend_from_slice(leaf);
+        path(&p)
+    };
+    let ms = |default: f64| NumSpec { min: 0.0, max: 10_000.0, step: 50.0, digits: 0, float: false, default };
+    g.add(&widgets::off_switch(ctx, "Window switcher", "", rw(&["off"])));
+    g.add(&widgets::spin(
+        ctx,
+        "Open delay (ms)",
+        "How long to hold the shortcut before the switcher appears",
+        rw(&["open-delay-ms"]),
+        ms(150.0),
+    ));
+    g.add(&widgets::spin(
+        ctx,
+        "Recent after (ms)",
+        "How long a window must stay focused to move up the list",
+        rw(&["debounce-ms"]),
+        ms(750.0),
+    ));
+
+    let hl = adw::ExpanderRow::builder().title("Highlight").subtitle("Frame around the selected window").build();
+    hl.add_row(&widgets::color(ctx, "Color", "", rw(&["highlight", "active-color"]), "#999999ff"));
+    hl.add_row(&widgets::color(ctx, "Urgent color", "", rw(&["highlight", "urgent-color"]), "#ff9999ff"));
+    let px = |default: f64| NumSpec { min: 0.0, max: 200.0, step: 1.0, digits: 0, float: false, default };
+    hl.add_row(&widgets::spin(ctx, "Padding", "", rw(&["highlight", "padding"]), px(30.0)));
+    hl.add_row(&widgets::spin(ctx, "Corner radius", "", rw(&["highlight", "corner-radius"]), px(0.0)));
+    g.add(&hl);
+
+    let pv = adw::ExpanderRow::builder().title("Previews").subtitle("Window thumbnails").build();
+    pv.add_row(&widgets::spin(
+        ctx,
+        "Maximum height",
+        "Logical pixels",
+        rw(&["previews", "max-height"]),
+        NumSpec { min: 16.0, max: 4000.0, step: 10.0, digits: 0, float: false, default: 480.0 },
+    ));
+    pv.add_row(&widgets::spin(
+        ctx,
+        "Maximum scale",
+        "Previews never grow beyond this fraction of the window size",
+        rw(&["previews", "max-scale"]),
+        NumSpec { min: 0.05, max: 1.0, step: 0.05, digits: 2, float: true, default: 0.5 },
+    ));
+    g.add(&pv);
+    g
 }
 
 /// `focus-follows-mouse` with its optional `max-scroll-amount="N%"` property.

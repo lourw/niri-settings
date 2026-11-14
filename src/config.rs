@@ -694,6 +694,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The node shapes the window switcher group writes are accepted.
+    #[test]
+    fn recent_windows_edits() {
+        let Some((mut s, dir)) = scratch("test-recent", "") else { return };
+        s.set_flag(&["recent-windows", "off"], true).unwrap();
+        s.set_value(&["recent-windows", "open-delay-ms"], Some(Value::Int(200))).unwrap();
+        s.set_value(&["recent-windows", "debounce-ms"], Some(Value::Int(500))).unwrap();
+        s.set_value(&["recent-windows", "highlight", "active-color"], Some(Value::String("#123456".into()))).unwrap();
+        s.set_value(&["recent-windows", "highlight", "padding"], Some(Value::Int(10))).unwrap();
+        s.set_value(&["recent-windows", "highlight", "corner-radius"], Some(Value::Int(8))).unwrap();
+        s.set_value(&["recent-windows", "previews", "max-height"], Some(Value::Int(300))).unwrap();
+        s.set_value(&["recent-windows", "previews", "max-scale"], Some(Value::Float(0.3))).unwrap();
+        s.set_flag(&["recent-windows", "off"], false).unwrap();
+        assert_eq!(s.value(&["recent-windows", "previews", "max-height"]), Some(Value::Int(300)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn copy_dir(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
         for e in std::fs::read_dir(from).unwrap().flatten() {
