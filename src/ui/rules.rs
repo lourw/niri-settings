@@ -8,7 +8,7 @@ use crate::config::Item;
 use crate::kdl::{self, Node, Value};
 use adw::prelude::*;
 use gtk::glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const NAME: &str = "window-rule";
@@ -291,11 +291,13 @@ struct State {
     ctx: Ctx,
     page: adw::PreferencesPage,
     group: RefCell<Option<adw::PreferencesGroup>>,
+    /// Rule index to show expanded after the next rebuild.
+    reopen: Cell<Option<usize>>,
 }
 
 pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
-    let st = Rc::new(State { ctx: ctx.clone(), page: page.clone(), group: RefCell::new(None) });
+    let st = Rc::new(State { ctx: ctx.clone(), page: page.clone(), group: RefCell::new(None), reopen: Cell::new(None) });
     st.rebuild();
     page
 }
@@ -309,127 +311,153 @@ impl State {
             "Window rules",
             "Settings for windows that match. Rules apply in order, and later rules override earlier ones.",
         );
+        let reopen = self.reopen.take();
         let items = self.ctx.store.borrow().items(NAME);
-        for item in items {
-            let rule = parse_item(&item);
-            let row = adw::ActionRow::builder()
-                .title(glib::markup_escape_text(&rule.title()))
-                .subtitle(glib::markup_escape_text(&rule.summary()))
-                .subtitle_lines(2)
-                .activatable(true)
-                .build();
-            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-            let st = self.clone();
-            row.connect_activated(move |_| st.edit(Some(item.clone())));
-            g.add(&row);
+        for (i, item) in items.into_iter().enumerate() {
+            g.add(&self.rule_row(Some(item), reopen == Some(i)));
         }
         let add = adw::ButtonRow::builder().title("Add Rule…").start_icon_name("list-add-symbolic").build();
-        let st = self.clone();
-        add.connect_activated(move |_| st.edit(None));
+        {
+            let (st, g2) = (self.clone(), g.clone());
+            add.connect_activated(move |add| {
+                // An unsaved rule, opened for editing, above the Add button.
+                let row = st.rule_row(None, true);
+                g2.remove(add);
+                g2.add(&row);
+                g2.add(add);
+            });
+        }
         g.add(&add);
         self.page.add(&g);
         *self.group.borrow_mut() = Some(g);
     }
 
-    fn edit(self: &Rc<Self>, existing: Option<Item>) {
+    /// A rule as an expander; its form is built on first expand.
+    fn rule_row(self: &Rc<Self>, existing: Option<Item>, expanded: bool) -> adw::ExpanderRow {
         let rule = existing.as_ref().map(parse_item).unwrap_or_default();
-        let dialog = adw::Dialog::builder()
-            .title(if existing.is_some() { "Edit Window Rule" } else { "Add Window Rule" })
-            .content_width(560)
-            .content_height(720)
+        let (title, summary) = if existing.is_some() {
+            (rule.title(), rule.summary())
+        } else {
+            ("New rule".to_string(), "Not saved yet".to_string())
+        };
+        let row = adw::ExpanderRow::builder()
+            .title(glib::markup_escape_text(&title))
+            .subtitle(glib::markup_escape_text(&summary))
+            .subtitle_lines(2)
             .build();
-        let toolbar = adw::ToolbarView::new();
-        let header = adw::HeaderBar::builder().show_end_title_buttons(false).show_start_title_buttons(false).build();
-        let cancel = gtk::Button::with_label("Cancel");
-        let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).build();
-        header.pack_start(&cancel);
-        header.pack_end(&save);
-        toolbar.add_top_bar(&header);
-        let page = adw::PreferencesPage::new();
-        toolbar.set_content(Some(&page));
-        dialog.set_child(Some(&toolbar));
-        {
-            let d = dialog.clone();
-            cancel.connect_clicked(move |_| {
-                d.close();
-            });
-        }
+        let st = self.clone();
+        widgets::lazy_rows(&row, move |row| st.fill_form(row, existing, rule));
+        row.set_expanded(expanded);
+        row
+    }
+
+    fn fill_form(self: &Rc<Self>, row: &adw::ExpanderRow, existing: Option<Item>, rule: Rule) {
+        let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).valign(gtk::Align::Center).build();
+        let discard = gtk::Button::builder().label("Discard").valign(gtk::Align::Center).build();
+        let is_new = existing.is_none();
+        save.set_sensitive(is_new);
+        discard.set_sensitive(is_new);
+        // Any edit enables Save/Discard.
+        let dirty: Rc<dyn Fn()> = {
+            let (save, discard) = (save.clone(), discard.clone());
+            Rc::new(move || {
+                save.set_sensitive(true);
+                discard.set_sensitive(true);
+            })
+        };
 
         // ── Conditions ──
-        let conds_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
         let cond_rows: Rc<RefCell<Vec<CondRow>>> = Rc::default();
-        let conds_group = widgets::group(
-            "Applies to",
-            "Regular expressions. A window must match a condition and no exclusion. With no conditions, the rule applies to every window.",
-        );
+        let conds_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let label = gtk::Label::builder()
+            .label("Applies to windows matching these regular expressions; with none, to every window")
+            .xalign(0.0)
+            .wrap(true)
+            .hexpand(true)
+            .css_classes(["dim-label"])
+            .build();
         let pick = gtk::MenuButton::builder()
             .icon_name("list-add-symbolic")
             .tooltip_text("Add condition")
+            .valign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
-        conds_group.set_header_suffix(Some(&pick));
-        conds_group.add(&conds_box);
-        page.add(&conds_group);
+        header.append(&label);
+        header.append(&pick);
+        conds_box.append(&header);
         let add_cond = {
-            let (cond_rows, conds_box) = (cond_rows.clone(), conds_box.clone());
-            Rc::new(move |c: Cond| {
-                let row = CondRow::new(&c);
-                conds_box.append(&row.list);
-                let (cond_rows2, conds_box2, list) = (cond_rows.clone(), conds_box.clone(), row.list.clone());
-                row.remove.connect_clicked(move |_| {
+            let (cond_rows, conds_box, dirty) = (cond_rows.clone(), conds_box.clone(), dirty.clone());
+            Rc::new(move |c: Cond, user: bool| {
+                let r = CondRow::new(&c);
+                conds_box.append(&r.list);
+                let (cond_rows2, conds_box2, list, d) = (cond_rows.clone(), conds_box.clone(), r.list.clone(), dirty.clone());
+                r.remove.connect_clicked(move |_| {
                     conds_box2.remove(&list);
                     cond_rows2.borrow_mut().retain(|r| r.list != list);
+                    d();
                 });
-                cond_rows.borrow_mut().push(row);
+                let d = dirty.clone();
+                r.kind.connect_selected_notify(move |_| d());
+                for e in [&r.app_id, &r.title] {
+                    let d = dirty.clone();
+                    e.connect_changed(move |_| d());
+                }
+                cond_rows.borrow_mut().push(r);
+                if user {
+                    dirty();
+                }
             })
         };
         for c in &rule.conds {
-            add_cond(c.clone());
+            add_cond(c.clone(), false);
         }
-        pick.set_popover(Some(&cond_popover(&pick, add_cond.clone())));
+        {
+            let add_cond = add_cond.clone();
+            pick.set_popover(Some(&cond_popover(&pick, Rc::new(move |c| add_cond(c, true)))));
+        }
+        row.add_row(&conds_box);
 
-        // ── Opening ──
-        let open = widgets::group("When it opens", "");
+        // ── Properties ──
         let mut bool_rows = Vec::new();
         for (k, label, sub) in BOOLS.iter().filter(|b| b.0.starts_with("open-")) {
             let r = tri_row(label, sub, rule.get_bool(k));
-            open.add(&r);
+            row.add_row(&r);
             bool_rows.push((k.to_string(), r));
         }
         let mut string_rows = Vec::new();
         for (k, label) in STRINGS {
             let r = adw::EntryRow::builder().title(*label).text(rule.get_string(k).unwrap_or("")).build();
-            open.add(&r);
+            row.add_row(&r);
             string_rows.push((k.to_string(), r));
         }
-        page.add(&open);
-
-        // ── Size ──
-        let size = widgets::group("Size", "");
         let mut size_rows = Vec::new();
         for (k, label) in SIZES {
             let (combo, spin) = size_rows_for(label, rule.get_size(k));
-            size.add(&combo);
-            size.add(&spin);
+            row.add_row(&combo);
+            row.add_row(&spin);
             size_rows.push((k.to_string(), combo, spin));
         }
-        page.add(&size);
-
-        // ── Look ──
-        let look = widgets::group("Appearance", "");
         let opacity = adw::SpinRow::with_range(0.0, 100.0, 5.0);
         opacity.set_title("Opacity");
         opacity.set_subtitle("Percent; 100 leaves the window as it is");
         opacity.set_value(rule.opacity.map(|o| o * 100.0).unwrap_or(100.0));
-        look.add(&opacity);
+        row.add_row(&opacity);
         let radius = adw::SpinRow::with_range(0.0, 100.0, 1.0);
         radius.set_title("Corner radius");
         radius.set_subtitle("For borders, focus ring and shadow; 0 leaves it unset");
         radius.set_value(rule.radius.unwrap_or(0.0));
-        look.add(&radius);
+        row.add_row(&radius);
         for (k, label, sub) in BOOLS.iter().filter(|b| !b.0.starts_with("open-")) {
             let r = tri_row(label, sub, rule.get_bool(k));
-            look.add(&r);
+            row.add_row(&r);
             bool_rows.push((k.to_string(), r));
         }
         let block_opts = [("Don't hide", None), ("Screencasts", Some("screencast")), ("All screen capture", Some("screen-capture"))];
@@ -439,48 +467,103 @@ impl State {
             .model(&gtk::StringList::new(&block_opts.iter().map(|o| o.0).collect::<Vec<_>>()))
             .build();
         block.set_selected(block_opts.iter().position(|o| o.1 == rule.block_out.as_deref()).unwrap_or(0) as u32);
-        look.add(&block);
-        page.add(&look);
-
-        if !rule.other.is_empty() {
-            let other = widgets::group("Other settings", "Kept as written. Edit them in the config file.");
-            for o in &rule.other {
-                let first = o.lines().next().unwrap_or("");
-                let more = if o.lines().count() > 1 { " …" } else { "" };
-                let row = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&format!("{first}{more}")))
-                    .css_classes(["monospace"])
-                    .build();
-                row.set_tooltip_text(Some(o));
-                other.add(&row);
-            }
-            page.add(&other);
+        row.add_row(&block);
+        for o in &rule.other {
+            let first = o.lines().next().unwrap_or("");
+            let more = if o.lines().count() > 1 { " …" } else { "" };
+            let r = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&format!("{first}{more}")))
+                .subtitle("Kept as written; edit it in the config file")
+                .css_classes(["monospace"])
+                .build();
+            r.set_tooltip_text(Some(o));
+            row.add_row(&r);
         }
 
-        if let Some(item) = existing.clone() {
-            let g = adw::PreferencesGroup::new();
-            let del = adw::ButtonRow::builder().title("Remove Rule").css_classes(["destructive-action"]).build();
-            let (st, d) = (self.clone(), dialog.clone());
-            del.connect_activated(move |_| {
-                let item = item.clone();
-                let (st2, d2) = (st.clone(), d.clone());
-                st.ctx.apply(move |s| s.edit_item(&item, None), move |ok| {
-                    if ok {
-                        d2.close();
-                        st2.rebuild();
+        // Mark dirty on any change.
+        for (_, r) in &bool_rows {
+            let d = dirty.clone();
+            r.connect_selected_notify(move |_| d());
+        }
+        for (_, r) in &string_rows {
+            let d = dirty.clone();
+            r.connect_changed(move |_| d());
+        }
+        for (_, c, sp) in &size_rows {
+            let d = dirty.clone();
+            c.connect_selected_notify(move |_| d());
+            let d = dirty.clone();
+            sp.connect_value_notify(move |_| d());
+        }
+        for sp in [&opacity, &radius] {
+            let d = dirty.clone();
+            sp.connect_value_notify(move |_| d());
+        }
+        {
+            let d = dirty.clone();
+            block.connect_selected_notify(move |_| d());
+        }
+
+        // ── Actions ──
+        let actions = gtk::Box::builder()
+            .spacing(6)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let remove = gtk::Button::builder()
+            .label(if is_new { "Cancel" } else { "Remove Rule" })
+            .css_classes(["destructive-action"])
+            .hexpand(true)
+            .halign(gtk::Align::Start)
+            .build();
+        actions.append(&remove);
+        if !is_new {
+            actions.append(&discard);
+        }
+        actions.append(&save);
+        row.add_row(&actions);
+
+        {
+            let (st, existing, row) = (self.clone(), existing.clone(), row.clone());
+            remove.connect_clicked(move |_| match existing.clone() {
+                None => {
+                    if let Some(g) = st.group.borrow().as_ref() {
+                        g.remove(&row);
                     }
-                });
+                }
+                Some(item) => {
+                    let st2 = st.clone();
+                    st.ctx.apply(move |s| s.edit_item(&item, None), move |ok| {
+                        if ok {
+                            st2.rebuild();
+                        }
+                    });
+                }
             });
-            g.add(&del);
-            page.add(&g);
+        }
+        {
+            // Discard: rebuild the list, keeping this rule open with saved values.
+            let (st, existing) = (self.clone(), existing.clone());
+            discard.connect_clicked(move |_| {
+                if let Some(item) = &existing {
+                    st.reopen.set(Some(st.index_of(item)));
+                }
+                st.rebuild();
+            });
         }
 
         let st = self.clone();
-        let d = dialog.clone();
         let other = rule.other.clone();
         save.connect_clicked(move |_| {
             let mut r = Rule { other: other.clone(), ..Default::default() };
-            r.conds = cond_rows.borrow().iter().map(CondRow::read).filter(|c| c.app_id.len() + c.title.len() + c.extra.len() > 0).collect();
+            r.conds = cond_rows
+                .borrow()
+                .iter()
+                .map(CondRow::read)
+                .filter(|c| c.app_id.len() + c.title.len() + c.extra.len() > 0)
+                .collect();
             for (k, row) in &bool_rows {
                 match row.selected() {
                     1 => r.bools.push((k.clone(), true)),
@@ -502,17 +585,22 @@ impl State {
                     _ => {}
                 }
             }
-            r.opacity = (opacity.value() < 100.0).then(|| (opacity.value() / 100.0 * 100.0).round() / 100.0);
+            r.opacity = (opacity.value() < 100.0).then(|| (opacity.value()).round() / 100.0);
             r.radius = (radius.value() > 0.0).then(|| radius.value());
             r.block_out = block_opts[block.selected() as usize].1.map(String::from);
 
             let existing = existing.clone();
             let indent = existing.as_ref().map(|i| i.indent.clone()).unwrap_or_default();
             let text = r.to_kdl(&indent);
-            let (st2, d2) = (st.clone(), d.clone());
+            // Keep the saved rule open after the list is rebuilt.
+            let reopen = match &existing {
+                Some(item) => st.index_of(item),
+                None => st.ctx.store.borrow().items(NAME).len(),
+            };
+            let st2 = st.clone();
             let done = move |ok: bool| {
                 if ok {
-                    d2.close();
+                    st2.reopen.set(Some(reopen));
                     st2.rebuild();
                 }
             };
@@ -522,11 +610,21 @@ impl State {
                 None => st.ctx.apply(move |s| s.add_item(&text), done),
             }
         });
-        dialog.present(Some(&self.ctx.window));
+    }
+
+    /// Position of `item` among all rules (for reopening it after a rebuild).
+    fn index_of(&self, item: &Item) -> usize {
+        self.ctx
+            .store
+            .borrow()
+            .items(NAME)
+            .iter()
+            .position(|i| i.file == item.file && i.index == item.index)
+            .unwrap_or(usize::MAX)
     }
 }
 
-/// One match/exclude line in the dialog.
+/// One match/exclude condition in a rule's form.
 struct CondRow {
     list: gtk::ListBox,
     kind: adw::ComboRow,
