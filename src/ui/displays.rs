@@ -5,6 +5,7 @@
 
 use super::widgets::{self, NumSpec};
 use super::{Ctx, Path, path, refs};
+use crate::config::ConfigStore;
 use crate::kdl::{self, Value};
 use adw::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -164,6 +165,7 @@ fn fill(ctx: &Ctx, page: &adw::PreferencesPage, outputs: Vec<Output>) {
     // Each tab's settings are built the first time it's shown. Position
     // fields of built tabs are kept in sync with the arrangement.
     let setters: Rc<RefCell<HashMap<String, PosSetter>>> = Rc::default();
+    let enable_rows: EnableRows = Rc::default();
     let bins: Vec<adw::Bin> = outputs
         .iter()
         .map(|o| {
@@ -176,7 +178,8 @@ fn fill(ctx: &Ctx, page: &adw::PreferencesPage, outputs: Vec<Output>) {
         outputs.iter().zip(&keys).map(|(o, k)| (o.name.clone(), k.clone(), o.logical)).collect();
     let count = outputs.len();
     let build_tab = {
-        let (ctx, setters, keys, redraw) = (ctx.clone(), setters.clone(), keys.clone(), redraw.clone());
+        let enable_rows = enable_rows.clone();
+        let (ctx, setters, keys, redraw) = (ctx.clone(), setters.clone(), Rc::new(keys.clone()), redraw.clone());
         let outputs = Rc::new(outputs);
         move |i: usize| {
             if bins[i].child().is_some() {
@@ -184,7 +187,7 @@ fn fill(ctx: &Ctx, page: &adw::PreferencesPage, outputs: Vec<Output>) {
             }
             let (g, set_pos) = super::timed(
                 || format!("build display tab '{}'", outputs[i].name),
-                || output_group(&ctx, &outputs[i], &keys[i], count == 1, redraw.clone()),
+                || output_group(&ctx, &outputs[i], i, &keys, &enable_rows, redraw.clone()),
             );
             setters.borrow_mut().insert(keys[i].clone(), set_pos);
             bins[i].set_child(Some(&g));
@@ -267,17 +270,20 @@ fn glib_escape(s: &str) -> String {
     gtk::glib::markup_escape_text(s).to_string()
 }
 
-fn output_group(ctx: &Ctx, o: &Output, key: &str, only: bool, on_change: Rc<dyn Fn()>) -> (adw::PreferencesGroup, PosSetter) {
+fn output_group(
+    ctx: &Ctx,
+    o: &Output,
+    idx: usize,
+    keys: &Rc<Vec<String>>,
+    enable_rows: &EnableRows,
+    on_change: Rc<dyn Fn()>,
+) -> (adw::PreferencesGroup, PosSetter) {
+    let key = &keys[idx];
     let base = kdl::keyed("output", key);
     let p = |leaf: &str| path(&[&base, leaf]);
     let g = widgets::group(&o.title(), &o.name);
 
-    let enabled = widgets::off_switch(ctx, "Enabled", "", p("off"));
-    if only && enabled.is_active() {
-        enabled.set_sensitive(false);
-        enabled.set_subtitle("This is your only display");
-    }
-    g.add(&enabled);
+    g.add(&enable_row(ctx, idx, keys, enable_rows, on_change.clone()));
 
     // Mode: preferred first, then by size and refresh rate.
     let mut modes: Vec<&Mode> = o.modes.iter().collect();
@@ -342,6 +348,147 @@ fn output_group(ctx: &Ctx, o: &Output, key: &str, only: bool, on_change: Rc<dyn 
     ));
     g.add(&widgets::color(ctx, "Backdrop color", "Behind workspaces in the overview", p("backdrop-color"), "#262626"));
     (g, set_pos)
+}
+
+/// Enable switches of the tabs built so far, with their config keys.
+type EnableRows = Rc<RefCell<Vec<(String, adw::SwitchRow)>>>;
+
+const KEEP_OFF_SECS: u32 = 15;
+const LAST_DISPLAY: &str = "At least one display has to stay on";
+
+fn is_off(s: &ConfigStore, key: &str) -> bool {
+    s.flag(&[&kdl::keyed("output", key), "off"])
+}
+
+/// Lock the switch of the last enabled connected display, so the user can't
+/// end up with every screen dark. If the config already has them all off,
+/// leave every switch usable so one can be turned back on.
+fn lock_last_enabled(ctx: &Ctx, keys: &[String], rows: &EnableRows) {
+    let s = ctx.store.borrow();
+    let on: Vec<&String> = keys.iter().filter(|k| !is_off(&s, k)).collect();
+    for (k, row) in rows.borrow().iter() {
+        let last = on.len() == 1 && on[0] == k;
+        row.set_sensitive(!last);
+        row.set_subtitle(if last { LAST_DISPLAY } else { "" });
+    }
+}
+
+/// "Enabled" switch for a display (written as `off`). Refuses to turn off the
+/// last enabled display, and turning one off asks to confirm, reverting
+/// after a countdown so a dark screen fixes itself.
+fn enable_row(ctx: &Ctx, idx: usize, keys: &Rc<Vec<String>>, rows: &EnableRows, on_change: Rc<dyn Fn()>) -> adw::SwitchRow {
+    let key = keys[idx].clone();
+    let row = adw::SwitchRow::builder().title("Enabled").build();
+    row.set_active(!is_off(&ctx.store.borrow(), &key));
+    rows.borrow_mut().push((key.clone(), row.clone()));
+    lock_last_enabled(ctx, keys, rows);
+
+    let guard = Rc::new(Cell::new(false));
+    // Sets the switch without writing to the config.
+    let set_quiet = {
+        let (row, guard) = (row.clone(), guard.clone());
+        move |on: bool| {
+            guard.set(true);
+            row.set_active(on);
+            guard.set(false);
+        }
+    };
+    let (ctx, keys, rows) = (ctx.clone(), keys.clone(), rows.clone());
+    row.connect_active_notify(move |row| {
+        if guard.get() {
+            return;
+        }
+        let on = row.is_active();
+        let (ctx2, keys2, rows2, on_change2, set_quiet2) =
+            (ctx.clone(), keys.clone(), rows.clone(), on_change.clone(), set_quiet.clone());
+        let (k, all) = (key.clone(), (*keys).clone());
+        let row = row.clone();
+        ctx.apply(
+            move |s| {
+                // Checked here, on the worker's copy, so quick toggles can't race past it.
+                if !on && all.iter().filter(|o| **o != k).all(|o| is_off(s, o)) {
+                    return Err(format!("{LAST_DISPLAY}, so this one can't be turned off."));
+                }
+                s.set_flag(&[&kdl::keyed("output", &k), "off"], !on)
+            },
+            move |ok| {
+                if !ok {
+                    set_quiet2(!on);
+                }
+                lock_last_enabled(&ctx2, &keys2, &rows2);
+                on_change2();
+                if ok && !on {
+                    confirm_keep_off(&ctx2, &row, keys2[idx].clone(), move |ctx: &Ctx| {
+                        set_quiet2(true);
+                        lock_last_enabled(ctx, &keys2, &rows2);
+                        on_change2();
+                    });
+                }
+            },
+        );
+    });
+    row
+}
+
+/// Ask whether to keep a display off; unless confirmed within
+/// `KEEP_OFF_SECS`, turn it back on and call `reverted`.
+fn confirm_keep_off(ctx: &Ctx, row: &adw::SwitchRow, key: String, reverted: impl Fn(&Ctx) + 'static) {
+    // Laptop panels: once they're off, unplugging the external displays leaves nothing lit.
+    let builtin = ["eDP", "LVDS", "DSI"].iter().any(|p| key.starts_with(p));
+    let body = move |n: u32| {
+        let warn = if builtin { "\n\nThis is the built-in screen: if you unplug your other displays, nothing will be on." } else { "" };
+        format!("It will turn back on in {n} seconds unless you keep it off.{warn}")
+    };
+    let dialog = adw::AlertDialog::new(Some("Keep this display off?"), Some(&body(KEEP_OFF_SECS)));
+    dialog.add_response("revert", "Turn Back On");
+    dialog.add_response("keep", "Keep Off");
+    dialog.set_response_appearance("keep", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("revert"));
+    dialog.set_close_response("revert");
+
+    let done = Rc::new(Cell::new(false));
+    let revert: Rc<dyn Fn()> = {
+        let (ctx, done) = (ctx.clone(), done.clone());
+        let reverted = Rc::new(reverted);
+        Rc::new(move || {
+            if done.replace(true) {
+                return;
+            }
+            let (ctx2, reverted) = (ctx.clone(), reverted.clone());
+            let key = key.clone();
+            ctx.apply(move |s| s.set_flag(&[&kdl::keyed("output", &key), "off"], false), move |ok| {
+                if ok {
+                    reverted(&ctx2);
+                }
+            });
+        })
+    };
+    {
+        let (done, revert) = (done.clone(), revert.clone());
+        dialog.connect_response(None, move |_, r| {
+            if r == "keep" {
+                done.set(true);
+            } else {
+                revert();
+            }
+        });
+    }
+    let left = Cell::new(KEEP_OFF_SECS);
+    let d = dialog.clone();
+    gtk::glib::timeout_add_seconds_local(1, move || {
+        if done.get() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        left.set(left.get() - 1);
+        if left.get() == 0 {
+            revert();
+            d.close();
+            return gtk::glib::ControlFlow::Break;
+        }
+        d.set_body(&body(left.get()));
+        gtk::glib::ControlFlow::Continue
+    });
+    dialog.present(Some(row));
 }
 
 /// Sets both position fields without writing to the config.
