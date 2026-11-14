@@ -194,28 +194,38 @@ impl ConfigStore {
     /// Replace (Some) or remove (None) a node returned by `items`. Fails if
     /// the node changed on disk since it was read.
     pub fn edit_item(&mut self, item: &Item, text: Option<String>) -> Result<(), String> {
+        self.edit_items(vec![(item.clone(), text)])
+    }
+
+    /// Several `edit_item`s validated and written together (e.g. swapping two
+    /// entries). Nodes are edited back to front so earlier spans stay valid.
+    pub fn edit_items(&mut self, mut edits: Vec<(Item, Option<String>)>) -> Result<(), String> {
+        edits.sort_by(|a, b| (&b.0.file, b.0.node.start).cmp(&(&a.0.file, a.0.node.start)));
         self.transact(|s| {
-            let name = item.node.name.clone();
-            let f = s
-                .files
-                .iter_mut()
-                .find(|f| f.path == item.file)
-                .ok_or_else(|| format!("{} is no longer part of the config", item.file.display()))?;
-            let node = f
-                .doc
-                .find_all(&name)
-                .nth(item.index)
-                .filter(|n| f.doc.text[n.span()] == item.src)
-                .cloned()
-                .ok_or("This entry was changed outside the app. Reload from disk and try again.")?;
-            let ierr = |e: kdl::ParseError| format!("internal edit error: {e}");
-            match text {
-                Some(t) => f.doc.splice(node.span(), &t).map_err(ierr),
-                None => {
-                    let r = f.doc.removal_range(&node);
-                    f.doc.splice(r, "").map_err(ierr)
+            for (item, text) in edits {
+                let name = item.node.name.clone();
+                let f = s
+                    .files
+                    .iter_mut()
+                    .find(|f| f.path == item.file)
+                    .ok_or_else(|| format!("{} is no longer part of the config", item.file.display()))?;
+                let node = f
+                    .doc
+                    .find_all(&name)
+                    .nth(item.index)
+                    .filter(|n| f.doc.text[n.span()] == item.src)
+                    .cloned()
+                    .ok_or("This entry was changed outside the app. Reload from disk and try again.")?;
+                let ierr = |e: kdl::ParseError| format!("internal edit error: {e}");
+                match text {
+                    Some(t) => f.doc.splice(node.span(), &t).map_err(ierr)?,
+                    None => {
+                        let r = f.doc.removal_range(&node);
+                        f.doc.splice(r, "").map_err(ierr)?
+                    }
                 }
             }
+            Ok(())
         })
     }
 

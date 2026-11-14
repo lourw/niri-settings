@@ -11,6 +11,7 @@ Pages:
 - **Displays**: resolution, refresh rate, scale, rotation, position, VRR, per-display colors
 - **Layout**: new column width, preset widths/heights, centering, tabbed columns, gaps, struts
 - **Appearance**: focus ring, border, shadow, colors, insert hint, animations, overview, hotkey overlay
+- **Workspaces**: named workspaces, their order and which display they open on
 - **Window Rules**: match apps by ID or title (or pick an open window) and set floating, size, workspace, opacity, corner radius and more
 - **Focus & Cursor**: focus behaviour, mod key, hot corner, middle-click paste, cursor theme
 - **Startup Apps**: programs and shell commands launched with niri

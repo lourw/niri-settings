@@ -9,6 +9,7 @@ pub mod pointer;
 pub mod rules;
 pub mod startup;
 pub mod widgets;
+pub mod workspaces;
 
 use crate::config::ConfigStore;
 use adw::prelude::*;
