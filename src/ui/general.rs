@@ -110,7 +110,7 @@ fn focus_follows_mouse(ctx: &Ctx) -> adw::ExpanderRow {
         let ctx = ctx.clone();
         let p = p.clone();
         let limit = limit.clone();
-        move |on: bool| {
+        move |on: bool, done: Box<dyn FnOnce(bool)>| {
             let text = on.then(|| {
                 let v = limit.value().round();
                 if v >= 100.0 {
@@ -119,7 +119,8 @@ fn focus_follows_mouse(ctx: &Ctx) -> adw::ExpanderRow {
                     format!("focus-follows-mouse max-scroll-amount={}", kdl::quote(&format!("{v}%")))
                 }
             });
-            ctx.apply(|s| s.set_node(&refs(&p), text))
+            let p = p.clone();
+            ctx.apply(move |s| s.set_node(&refs(&p), text), done);
         }
     };
 
@@ -132,11 +133,17 @@ fn focus_follows_mouse(ctx: &Ctx) -> adw::ExpanderRow {
                 return;
             }
             let on = row.enables_expansion();
-            if !write(on) {
-                guard.set(true);
-                row.set_enable_expansion(!on);
-                guard.set(false);
-            }
+            let (row, guard) = (row.clone(), guard.clone());
+            write(
+                on,
+                Box::new(move |ok| {
+                    if !ok {
+                        guard.set(true);
+                        row.set_enable_expansion(!on);
+                        guard.set(false);
+                    }
+                }),
+            );
         });
     }
     let deb = widgets::Debouncer::default();
@@ -146,9 +153,7 @@ fn focus_follows_mouse(ctx: &Ctx) -> adw::ExpanderRow {
             return;
         }
         let write = write.clone();
-        deb.run(400, move || {
-            write(true);
-        });
+        deb.run(400, move || write(true, Box::new(|_| {})));
     });
     row
 }

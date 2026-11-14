@@ -7,7 +7,6 @@ use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::rc::Rc;
 use ui::Ctx;
-use ui::pointer::Device;
 
 const APP_ID: &str = "io.github.NiriSettings";
 
@@ -32,17 +31,19 @@ struct PageDef {
 
 const PAGES: &[PageDef] = &[
     PageDef { id: "keyboard", title: "Keyboard", icon: "input-keyboard-symbolic", build: |c| ui::keyboard::page(c).upcast() },
-    PageDef { id: "mouse", title: "Mouse", icon: "input-mouse-symbolic", build: |c| ui::pointer::page(c, Device::Mouse).upcast() },
-    PageDef { id: "touchpad", title: "Touchpad", icon: "input-touchpad-symbolic", build: |c| ui::pointer::page(c, Device::Touchpad).upcast() },
-    PageDef { id: "trackpoint", title: "Trackpoint", icon: "input-mouse-symbolic", build: |c| ui::pointer::page(c, Device::Trackpoint).upcast() },
-    PageDef { id: "trackball", title: "Trackball", icon: "input-mouse-symbolic", build: |c| ui::pointer::page(c, Device::Trackball).upcast() },
+    PageDef { id: "input", title: "Input", icon: "input-touchpad-symbolic", build: ui::pointer::input_page },
     PageDef { id: "general", title: "Focus & Cursor", icon: "find-location-symbolic", build: |c| ui::general::page(c).upcast() },
     PageDef { id: "shortcuts", title: "Shortcuts", icon: "preferences-desktop-keyboard-shortcuts-symbolic", build: ui::keybinds::page },
     PageDef { id: "fingerprint", title: "Fingerprint", icon: "auth-fingerprint-symbolic", build: |c| ui::fingerprint::page(c).upcast() },
 ];
 
 fn main() -> glib::ExitCode {
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let mut flags = gio::ApplicationFlags::empty();
+    if std::env::var_os("NIRI_SETTINGS_SCREENSHOT").is_some() {
+        // Don't hand off to an already-running instance.
+        flags |= gio::ApplicationFlags::NON_UNIQUE;
+    }
+    let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
     app.connect_startup(|_| {
         gtk::Window::set_default_icon_name(APP_ID);
         let provider = gtk::CssProvider::new();
@@ -88,7 +89,8 @@ fn build_window(app: &adw::Application) {
             return;
         }
     };
-    let ctx = Ctx { store: Rc::new(RefCell::new(store)), window: window.clone(), toasts: toasts.clone() };
+    let worker = Rc::new(ui::Worker::spawn(store.main.clone()));
+    let ctx = Ctx { store: Rc::new(RefCell::new(store)), worker, window: window.clone(), toasts: toasts.clone() };
 
     // Sidebar.
     let sidebar_list = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();

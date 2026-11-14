@@ -6,6 +6,8 @@ use crate::kdl::Value;
 use adw::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use crate::config::ConfigStore;
 
 /// Parsed `/usr/share/X11/xkb/rules/evdev.lst`.
 #[derive(Default)]
@@ -134,11 +136,10 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
                     let ctx2 = ctx.clone();
                     let rb = rebuild_ref.clone();
                     up.connect_clicked(move |_| {
-                        let mut l = current_layouts(&ctx2);
-                        l.swap(i, i - 1);
-                        if write_layouts(&ctx2, &l) {
+                        let rb = rb.clone();
+                        edit_layouts(&ctx2, move |l| if i < l.len() { l.swap(i, i - 1) }, move || {
                             if let Some(f) = rb.borrow().as_ref() { f() }
-                        }
+                        });
                     });
                     row.add_suffix(&up);
                 }
@@ -147,11 +148,10 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
                     let ctx2 = ctx.clone();
                     let rb = rebuild_ref.clone();
                     rm.connect_clicked(move |_| {
-                        let mut l = current_layouts(&ctx2);
-                        l.remove(i);
-                        if write_layouts(&ctx2, &l) {
+                        let rb = rb.clone();
+                        edit_layouts(&ctx2, move |l| if i < l.len() { l.remove(i); }, move || {
                             if let Some(f) = rb.borrow().as_ref() { f() }
-                        }
+                        });
                     });
                     row.add_suffix(&rm);
                 }
@@ -172,13 +172,18 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
                 let ctx3 = ctx2.clone();
                 let rb = rb.clone();
                 layout_picker(&ctx2, &db2, move |layout, variant| {
-                    let mut l = current_layouts(&ctx3);
-                    if !l.iter().any(|(a, b)| *a == layout && *b == variant) {
-                        l.push((layout, variant));
-                    }
-                    if write_layouts(&ctx3, &l) {
-                        if let Some(f) = rb.borrow().as_ref() { f() }
-                    }
+                    let rb = rb.clone();
+                    edit_layouts(
+                        &ctx3,
+                        move |l| {
+                            if !l.iter().any(|(a, b)| *a == layout && *b == variant) {
+                                l.push((layout, variant));
+                            }
+                        },
+                        move || {
+                            if let Some(f) = rb.borrow().as_ref() { f() }
+                        },
+                    );
                 });
             });
             layouts_box.append(&add);
@@ -201,7 +206,7 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
     let grp: Vec<String> = db.options.iter().map(|(o, _)| o.clone()).filter(|o| o.starts_with("grp:")).collect();
     let other = adw::EntryRow::builder().title("Other XKB options (comma-separated)").show_apply_button(true).build();
 
-    let families: Rc<Vec<Vec<String>>> = Rc::new(vec![caps, compose, grp]);
+    let families: Arc<Vec<Vec<String>>> = Arc::new(vec![caps, compose, grp]);
     let titles = [
         ("Caps Lock behavior", "Default"),
         ("Compose key", "None"),
@@ -226,12 +231,15 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         let ctx2 = ctx.clone();
         let families = families.clone();
         row.connect_selected_notify(move |row| {
-            let fam = &families[fi];
-            let mut opts: Vec<String> = current_options(&ctx2).into_iter().filter(|o| !fam.contains(o)).collect();
-            if let Some(o) = (row.selected() as usize).checked_sub(1).and_then(|i| fam.get(i)) {
-                opts.push(o.clone());
-            }
-            write_options(&ctx2, &opts);
+            let families = families.clone();
+            let sel = row.selected() as usize;
+            edit_options(&ctx2, move |opts| {
+                let fam = &families[fi];
+                opts.retain(|o| !fam.contains(o));
+                if let Some(o) = sel.checked_sub(1).and_then(|i| fam.get(i)) {
+                    opts.push(o.clone());
+                }
+            });
         });
         opts_group.add(&row);
     }
@@ -243,10 +251,13 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         let ctx2 = ctx.clone();
         let families = families.clone();
         other.connect_apply(move |row| {
-            let mut opts: Vec<String> =
-                current_options(&ctx2).into_iter().filter(|o| known(o, &families)).collect();
-            opts.extend(row.text().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
-            write_options(&ctx2, &opts);
+            let families = families.clone();
+            let extra: Vec<String> =
+                row.text().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            edit_options(&ctx2, move |opts| {
+                opts.retain(|o| known(o, &families));
+                opts.extend(extra);
+            });
         });
     }
     opts_group.add(&other);
@@ -299,40 +310,65 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .build()
 }
 
-fn current_layouts(ctx: &Ctx) -> Vec<(String, String)> {
-    let s = ctx.store.borrow();
+fn layouts_of(s: &ConfigStore) -> Vec<(String, String)> {
     let layouts = s.string(&xkb_path("layout")).unwrap_or_default();
     if layouts.trim().is_empty() {
         return Vec::new();
     }
     let variants = s.string(&xkb_path("variant")).unwrap_or_default();
-    let ls = split_list(&layouts);
     let vs = split_list(&variants);
-    ls.into_iter()
+    split_list(&layouts)
+        .into_iter()
         .enumerate()
         .map(|(i, l)| (l, vs.get(i).cloned().unwrap_or_default()))
         .collect()
 }
 
-fn write_layouts(ctx: &Ctx, list: &[(String, String)]) -> bool {
-    let layout = list.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(",");
-    let variant = list.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(",");
-    let has_variant = list.iter().any(|(_, v)| !v.is_empty());
-    let layout_node = (!layout.is_empty()).then(|| format!("layout {}", Value::String(layout).to_kdl()));
-    let variant_node = has_variant.then(|| format!("variant {}", Value::String(variant).to_kdl()));
-    ctx.apply(|s| s.set_nodes(&[(&xkb_path("layout"), layout_node), (&xkb_path("variant"), variant_node)]))
+fn current_layouts(ctx: &Ctx) -> Vec<(String, String)> {
+    layouts_of(&ctx.store.borrow())
 }
 
-fn current_options(ctx: &Ctx) -> Vec<String> {
-    let s = ctx.store.borrow();
+/// Read-modify-write of the layout list, done on the worker so quick
+/// successive clicks always see the latest list.
+fn edit_layouts(
+    ctx: &Ctx,
+    f: impl FnOnce(&mut Vec<(String, String)>) + Send + 'static,
+    done: impl FnOnce() + 'static,
+) {
+    ctx.apply(
+        move |s| {
+            s.reload()?;
+            let mut list = layouts_of(s);
+            f(&mut list);
+            let layout = list.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(",");
+            let variant = list.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(",");
+            let has_variant = list.iter().any(|(_, v)| !v.is_empty());
+            let layout_node = (!layout.is_empty()).then(|| format!("layout {}", Value::String(layout).to_kdl()));
+            let variant_node = has_variant.then(|| format!("variant {}", Value::String(variant).to_kdl()));
+            s.set_nodes(&[(&xkb_path("layout"), layout_node), (&xkb_path("variant"), variant_node)])
+        },
+        move |_| done(),
+    );
+}
+
+fn options_of(s: &ConfigStore) -> Vec<String> {
     s.string(&xkb_path("options"))
         .map(|o| split_list(&o).into_iter().filter(|x| !x.is_empty()).collect())
         .unwrap_or_default()
 }
 
-fn write_options(ctx: &Ctx, opts: &[String]) -> bool {
-    let joined = opts.join(",");
-    ctx.apply(|s| s.set_value(&xkb_path("options"), (!joined.is_empty()).then(|| Value::String(joined))))
+fn current_options(ctx: &Ctx) -> Vec<String> {
+    options_of(&ctx.store.borrow())
+}
+
+fn edit_options(ctx: &Ctx, f: impl FnOnce(&mut Vec<String>) + Send + 'static) {
+    ctx.apply_quiet(move |s| {
+        s.reload()?;
+        let mut opts = options_of(s);
+        f(&mut opts);
+        let joined = opts.join(",");
+        s.set_value(&xkb_path("options"), (!joined.is_empty()).then(|| Value::String(joined)))
+    });
 }
 
 /// Searchable dialog listing every layout and variant.

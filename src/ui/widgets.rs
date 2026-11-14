@@ -46,11 +46,15 @@ pub fn switch(ctx: &Ctx, title: &str, subtitle: &str, p: Path) -> adw::SwitchRow
             return;
         }
         let on = row.is_active();
-        if !ctx.apply(|s| s.set_flag(&refs(&p), on)) {
-            guard.set(true);
-            row.set_active(!on);
-            guard.set(false);
-        }
+        let p = p.clone();
+        let (row, guard) = (row.clone(), guard.clone());
+        ctx.apply(move |s| s.set_flag(&refs(&p), on), move |ok| {
+            if !ok {
+                guard.set(true);
+                row.set_active(!on);
+                guard.set(false);
+            }
+        });
     });
     row
 }
@@ -75,11 +79,15 @@ pub fn bool_arg(ctx: &Ctx, title: &str, subtitle: &str, p: Path, default: bool) 
         }
         let on = row.is_active();
         let v = (on != default).then_some(Value::Bool(on));
-        if !ctx.apply(|s| s.set_value(&refs(&p), v)) {
-            guard.set(true);
-            row.set_active(!on);
-            guard.set(false);
-        }
+        let p = p.clone();
+        let (row, guard) = (row.clone(), guard.clone());
+        ctx.apply(move |s| s.set_value(&refs(&p), v), move |ok| {
+            if !ok {
+                guard.set(true);
+                row.set_active(!on);
+                guard.set(false);
+            }
+        });
     });
     row
 }
@@ -103,7 +111,12 @@ pub fn combo(
         selected = Some(values.len() - 1);
     }
     let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
-    let row = adw::ComboRow::builder().title(title).subtitle(subtitle).model(&model).build();
+    let row = adw::ComboRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .model(&model)
+        .list_factory(&unellipsized_list_factory())
+        .build();
     row.set_selected(selected.unwrap() as u32);
     let ctx = ctx.clone();
     let last = Rc::new(Cell::new(selected.unwrap() as u32));
@@ -114,15 +127,46 @@ pub fn combo(
         }
         let i = row.selected();
         let Some(v) = values.get(i as usize).cloned() else { return };
-        if ctx.apply(|s| s.set_value(&refs(&p), v.map(Value::String))) {
-            last.set(i);
-        } else {
-            guard.set(true);
-            row.set_selected(last.get());
-            guard.set(false);
-        }
+        let p = p.clone();
+        let (row, guard, last) = (row.clone(), guard.clone(), last.clone());
+        ctx.apply(move |s| s.set_value(&refs(&p), v.map(Value::String)), move |ok| {
+            if ok {
+                last.set(i);
+            } else {
+                guard.set(true);
+                row.set_selected(last.get());
+                guard.set(false);
+            }
+        });
     });
     row
+}
+
+/// Popup item factory that shows full labels (wrapping if needed) instead of
+/// AdwComboRow's default ellipsized ones.
+fn unellipsized_list_factory() -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(40)
+            .build();
+        item.set_child(Some(&label));
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        let (Some(label), Some(obj)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<gtk::StringObject>(),
+        ) else {
+            return;
+        };
+        label.set_label(&obj.string());
+    });
+    factory
 }
 
 pub struct NumSpec {
@@ -170,9 +214,11 @@ pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: Path, spec: NumSpec) -> a
             let val = (!(spec.default == 0.0 && row.value() == 0.0)).then(|| num_value(&spec, row.value()));
             deb.run(400, move || {
                 let set = val.is_some();
-                if ctx.apply(|s| s.set_value(&refs(&p), val)) {
-                    reset.set_visible(set);
-                }
+                ctx.apply(move |s| s.set_value(&refs(&p), val), move |ok| {
+                    if ok {
+                        reset.set_visible(set);
+                    }
+                });
             });
         });
     }
@@ -180,12 +226,16 @@ pub fn spin(ctx: &Ctx, title: &str, subtitle: &str, p: Path, spec: NumSpec) -> a
         let ctx = ctx.clone();
         let row2 = row.clone();
         reset.connect_clicked(move |btn| {
-            if ctx.apply(|s| s.set_value(&refs(&p), None)) {
-                guard.set(true);
-                row2.set_value(default);
-                guard.set(false);
-                btn.set_visible(false);
-            }
+            let p = p.clone();
+            let (row2, guard, btn) = (row2.clone(), guard.clone(), btn.clone());
+            ctx.apply(move |s| s.set_value(&refs(&p), None), move |ok| {
+                if ok {
+                    guard.set(true);
+                    row2.set_value(default);
+                    guard.set(false);
+                    btn.set_visible(false);
+                }
+            });
         });
     }
     row
@@ -224,9 +274,11 @@ pub fn slider(ctx: &Ctx, title: &str, subtitle: &str, p: Path, min: f64, max: f6
             let p = p.clone();
             let reset = reset.clone();
             deb.run(350, move || {
-                if ctx.apply(|s| s.set_value(&refs(&p), Some(Value::Float(v)))) {
-                    reset.set_visible(true);
-                }
+                ctx.apply(move |s| s.set_value(&refs(&p), Some(Value::Float(v))), move |ok| {
+                    if ok {
+                        reset.set_visible(true);
+                    }
+                });
             });
         });
     }
@@ -234,12 +286,16 @@ pub fn slider(ctx: &Ctx, title: &str, subtitle: &str, p: Path, min: f64, max: f6
         let ctx = ctx.clone();
         let scale = scale.clone();
         reset.connect_clicked(move |btn| {
-            if ctx.apply(|s| s.set_value(&refs(&p), None)) {
-                guard.set(true);
-                scale.set_value(default);
-                guard.set(false);
-                btn.set_visible(false);
-            }
+            let p = p.clone();
+            let (scale, guard, btn) = (scale.clone(), guard.clone(), btn.clone());
+            ctx.apply(move |s| s.set_value(&refs(&p), None), move |ok| {
+                if ok {
+                    guard.set(true);
+                    scale.set_value(default);
+                    guard.set(false);
+                    btn.set_visible(false);
+                }
+            });
         });
     }
     row

@@ -1,9 +1,10 @@
 //! Loading the niri config (following `include`s) and committing edits safely.
 //!
 //! Every edit re-reads the files from disk first, so changes made in a text
-//! editor while the app is open are never clobbered. Before a file is written
-//! the candidate is checked with `niri validate`; invalid results are rejected
-//! (or rolled back) so niri never ends up with a broken config.
+//! editor while the app is open are never clobbered. Before anything is
+//! written, a copy of the whole config with the edit applied is checked with
+//! `niri validate` in a temp dir, so niri never sees a broken config. niri
+//! watches its config (including included files) and reloads by itself.
 
 use crate::kdl::{self, Document, Node, Value};
 use std::collections::HashSet;
@@ -20,8 +21,9 @@ pub struct ConfigStore {
     pub files: Vec<LoadedFile>,
     backed_up: HashSet<PathBuf>,
     backup_dir: PathBuf,
-    /// Ask the running niri to reload after writes (off in tests).
-    notify_niri: bool,
+    /// Some include uses an absolute or `~` path, so a temp-dir copy of the
+    /// config wouldn't pick up the edited file; validate in place instead.
+    absolute_includes: bool,
 }
 
 pub fn main_config_path() -> PathBuf {
@@ -64,7 +66,7 @@ impl ConfigStore {
             files: Vec::new(),
             backed_up: HashSet::new(),
             backup_dir: state_home().join("niri-settings/backups").join(stamp.to_string()),
-            notify_niri: true,
+            absolute_includes: false,
         };
         store.reload()?;
         Ok(store)
@@ -73,8 +75,10 @@ impl ConfigStore {
     pub fn reload(&mut self) -> Result<(), String> {
         let mut files = Vec::new();
         let mut seen = HashSet::new();
-        load_recursive(&self.main, &mut files, &mut seen)?;
+        let mut absolute = false;
+        load_recursive(&self.main, &mut files, &mut seen, &mut absolute)?;
         self.files = files;
+        self.absolute_includes = absolute;
         Ok(())
     }
 
@@ -133,16 +137,14 @@ impl ConfigStore {
             self.reload()?;
             return Err(e);
         }
-        for fi in 0..self.files.len() {
-            if self.files[fi].doc.text != originals[fi] {
-                let new_text = self.files[fi].doc.text.clone();
-                if let Err(e) = self.commit(fi, &originals[fi], new_text) {
-                    let _ = self.reload();
-                    return Err(e);
-                }
-            }
+        let changed: Vec<usize> =
+            (0..self.files.len()).filter(|&i| self.files[i].doc.text != originals[i]).collect();
+        if changed.is_empty() {
+            return Ok(());
         }
-        self.reload()
+        let res = self.commit(&changed, &originals);
+        let reloaded = self.reload();
+        res.and(reloaded)
     }
 
     /// Apply one edit to the in-memory documents.
@@ -188,44 +190,56 @@ impl ConfigStore {
     }
 
 
-    fn commit(&mut self, fi: usize, old_text: &str, new_text: String) -> Result<(), String> {
-        let path = self.files[fi].path.clone();
-        if new_text == old_text {
-            return Ok(());
+    /// Validate the staged documents as a whole, then write the changed files.
+    fn commit(&mut self, changed: &[usize], originals: &[String]) -> Result<(), String> {
+        let validated = self.validate_staged()?;
+        for &fi in changed {
+            let path = self.files[fi].path.clone();
+            self.backup(&path, &originals[fi]);
+            std::fs::write(&path, &self.files[fi].doc.text)
+                .map_err(|e| format!("writing {}: {e}", path.display()))?;
         }
-        Document::parse(new_text.as_str()).map_err(|e| format!("internal edit error: {e}"))?;
-
-        // Pre-validate the edited file on its own. Included fragments are
-        // normally valid configs by themselves; if the original is not
-        // (e.g. it includes relative paths), fall back to validating the
-        // whole config after writing and roll back on failure.
-        let pre = validate_text(&new_text);
-        if let Err(msg) = pre {
-            if validate_text(old_text).is_ok() {
+        if !validated {
+            // Couldn't check a copy beforehand: check in place, roll back on failure.
+            if let Err(msg) = validate_path(&self.files[0].path) {
+                for &fi in changed {
+                    let _ = std::fs::write(&self.files[fi].path, &originals[fi]);
+                }
                 return Err(msg);
             }
         }
-
-        self.backup(&path, old_text);
-        std::fs::write(&path, &new_text).map_err(|e| format!("writing {}: {e}", path.display()))?;
-
-        // Validate the merged config too (catches e.g. duplicate binds across
-        // files); roll back if niri rejects it.
-        if let Err(msg) = validate_path(&self.main) {
-            let _ = std::fs::write(&path, old_text);
-            return Err(msg);
-        }
-
-        // niri watches its config, but ask explicitly too in case the file
-        // is an include it doesn't watch on this version. Errors are ignored.
-        if self.notify_niri {
-            let _ = Command::new("niri")
-                .args(["msg", "action", "load-config-file"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
         Ok(())
+    }
+
+    /// Write the staged config tree to a temp dir and run `niri validate` on
+    /// it. Returns Ok(false) if the tree can't be mirrored faithfully.
+    fn validate_staged(&self) -> Result<bool, String> {
+        let Some(base) = self.files[0].path.parent() else { return Ok(false) };
+        if self.absolute_includes || !self.files.iter().all(|f| f.path.starts_with(base)) {
+            return Ok(false);
+        }
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = runtime.join(format!("niri-settings-validate-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let write_all = || -> std::io::Result<()> {
+            for f in &self.files {
+                let dest = tmp.join(f.path.strip_prefix(base).unwrap());
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(dest, &f.doc.text)?;
+            }
+            Ok(())
+        };
+        if write_all().is_err() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Ok(false);
+        }
+        let res = validate_path(&tmp.join(self.files[0].path.file_name().unwrap()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        res.map(|()| true)
     }
 
     fn backup(&mut self, path: &Path, text: &str) {
@@ -259,6 +273,7 @@ fn load_recursive(
     path: &Path,
     out: &mut Vec<LoadedFile>,
     seen: &mut HashSet<PathBuf>,
+    absolute: &mut bool,
 ) -> Result<(), String> {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canonical.clone()) {
@@ -277,10 +292,11 @@ fn load_recursive(
     out.push(LoadedFile { path: canonical.clone(), doc });
     let dir = canonical.parent().unwrap_or(Path::new("/")).to_path_buf();
     for inc in includes {
+        *absolute |= inc.is_absolute() || inc.starts_with("~");
         let inc = expand_tilde(&inc);
         let full = if inc.is_absolute() { inc } else { dir.join(inc) };
         if full.exists() {
-            load_recursive(&full, out, seen)?;
+            load_recursive(&full, out, seen, absolute)?;
         }
     }
     Ok(())
@@ -291,17 +307,6 @@ fn expand_tilde(p: &Path) -> PathBuf {
         Ok(rest) => home().join(rest),
         Err(_) => p.to_path_buf(),
     }
-}
-
-fn validate_text(text: &str) -> Result<(), String> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let tmp = dir.join(format!("niri-settings-validate-{}.kdl", std::process::id()));
-    std::fs::write(&tmp, text).map_err(|e| format!("writing temp file: {e}"))?;
-    let res = validate_path(&tmp);
-    let _ = std::fs::remove_file(&tmp);
-    res
 }
 
 pub fn validate_path(path: &Path) -> Result<(), String> {
@@ -359,7 +364,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         copy_dir(&src, &dir);
         let mut s = ConfigStore::load_from(dir.join("config.kdl")).unwrap();
-        s.notify_niri = false;
         s.backup_dir = dir.join("backups");
         assert!(s.files.len() > 1, "includes followed");
 

@@ -705,11 +705,15 @@ fn edit_dialog(state: &Rc<PageState>, existing: Option<Bind>) {
         let key = b.key.clone();
         let dialog2 = dialog.clone();
         del.connect_activated(move |_| {
-            if st.ctx.apply(|s| s.set_node(&["binds", &key], None)) {
-                st.ctx.toast("Shortcut deleted");
-                dialog2.close();
-                st.rebuild();
-            }
+            let key = key.clone();
+            let (st2, dialog2) = (st.clone(), dialog2.clone());
+            st.ctx.apply(move |s| s.set_node(&["binds", &key], None), move |ok| {
+                if ok {
+                    st2.ctx.toast("Shortcut deleted");
+                    dialog2.close();
+                    st2.rebuild();
+                }
+            });
         });
         del_group.add(&del);
         page.add(&del_group);
@@ -808,7 +812,9 @@ fn edit_dialog(state: &Rc<PageState>, existing: Option<Bind>) {
                 let existing_key = existing.as_ref().map(|b| b.key.clone());
                 let key = key.clone();
                 move |conflict: Option<Bind>| {
-                    let ok = st.ctx.apply(|s| {
+                    let (existing_key, key, text) = (existing_key.clone(), key.clone(), text.clone());
+                    let (st2, dialog2) = (st.clone(), dialog2.clone());
+                    st.ctx.apply(move |s| {
                         let mut edits: Vec<(Vec<&str>, Option<String>)> = Vec::new();
                         if let Some(c) = &conflict {
                             edits.push((vec!["binds", c.key.as_str()], None));
@@ -819,12 +825,13 @@ fn edit_dialog(state: &Rc<PageState>, existing: Option<Bind>) {
                         let refs: Vec<(&[&str], Option<String>)> =
                             edits.iter().map(|(p, t)| (p.as_slice(), t.clone())).collect();
                         s.set_nodes(&refs)
+                    }, move |ok| {
+                        if ok {
+                            st2.ctx.toast("Shortcut saved");
+                            dialog2.close();
+                            st2.rebuild();
+                        }
                     });
-                    if ok {
-                        st.ctx.toast("Shortcut saved");
-                        dialog2.close();
-                        st.rebuild();
-                    }
                 }
             };
             match conflict {

@@ -59,24 +59,33 @@ pub fn page(ctx: &Ctx, dev: Device) -> adw::PreferencesPage {
     if dev == Device::Touchpad {
         general.add(&widgets::switch(
             ctx,
-            "Disable while typing",
-            "Ignore the touchpad briefly after key presses",
-            p("dwt"),
-        ));
-        general.add(&widgets::switch(
-            ctx,
-            "Disable while using trackpoint",
-            "",
-            p("dwtp"),
-        ));
-        general.add(&widgets::switch(
-            ctx,
             "Disable when an external mouse is connected",
             "",
             p("disabled-on-external-mouse"),
         ));
     }
     page.add(&general);
+
+    if dev == Device::Touchpad {
+        let palm = widgets::group(
+            "Palm Rejection",
+            "Turn these off to keep the touchpad active while typing. libinput's built-in \
+             palm detection (by touch size and pressure) can't be changed from niri.",
+        );
+        palm.add(&widgets::switch(
+            ctx,
+            "Disable while typing",
+            "Ignore the touchpad briefly after key presses",
+            p("dwt"),
+        ));
+        palm.add(&widgets::switch(
+            ctx,
+            "Disable while using trackpoint",
+            "Ignore the touchpad while the trackpoint is in use",
+            p("dwtp"),
+        ));
+        page.add(&palm);
+    }
 
     // ── Pointer speed ──
     let speed = widgets::group("Pointer Speed", "");
@@ -195,4 +204,35 @@ pub fn page(ctx: &Ctx, dev: Device) -> adw::PreferencesPage {
     page.add(&scroll);
 
     page
+}
+
+/// One "Input" page with a tab per pointer device.
+pub fn input_page(ctx: &Ctx) -> gtk::Widget {
+    let stack = adw::ViewStack::new();
+    stack.set_vexpand(true);
+    let tabs = [
+        (Device::Touchpad, "Touchpad", "input-touchpad-symbolic"),
+        (Device::Mouse, "Mouse", "input-mouse-symbolic"),
+        (Device::Trackpoint, "Trackpoint", "input-mouse-symbolic"),
+        (Device::Trackball, "Trackball", "input-mouse-symbolic"),
+    ];
+    for (dev, title, icon) in tabs {
+        stack.add_titled_with_icon(&page(ctx, dev), Some(dev.node()), title, icon);
+    }
+    let switcher = adw::InlineViewSwitcher::builder()
+        .stack(&stack)
+        .display_mode(adw::InlineViewSwitcherDisplayMode::Labels)
+        .homogeneous(true)
+        .build();
+    let clamp = adw::Clamp::builder()
+        .maximum_size(600)
+        .margin_top(12)
+        .margin_start(12)
+        .margin_end(12)
+        .child(&switcher)
+        .build();
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.append(&clamp);
+    root.append(&stack);
+    root.upcast()
 }
