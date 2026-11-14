@@ -4,7 +4,7 @@ use super::Ctx;
 use crate::kdl::{self, Document, Value};
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -258,6 +258,7 @@ pub fn page(ctx: &Ctx) -> gtk::Widget {
         prefs,
         search: search.clone(),
         groups: RefCell::new(Vec::new()),
+        generation: Cell::new(0),
     });
     state.rebuild();
 
@@ -277,6 +278,8 @@ struct PageState {
     prefs: adw::PreferencesPage,
     search: gtk::SearchEntry,
     groups: RefCell<Vec<(adw::PreferencesGroup, Vec<(adw::ActionRow, String)>)>>,
+    /// Bumped on every rebuild so a still-running chunked fill stops.
+    generation: Cell<u64>,
 }
 
 impl PageState {
@@ -294,41 +297,67 @@ impl PageState {
             self.groups.borrow_mut().push((g, Vec::new()));
             return;
         }
-        let mut current: Option<(adw::PreferencesGroup, Vec<(adw::ActionRow, String)>)> = None;
-        let mut last_section: Option<String> = None;
-        for b in &data.binds {
-            if last_section.as_ref() != Some(&b.section) {
-                if let Some(g) = current.take() {
-                    self.prefs.add(&g.0);
-                    self.groups.borrow_mut().push(g);
-                }
-                let title = if b.section.is_empty() { "Shortcuts".to_string() } else { b.section.clone() };
-                current = Some((adw::PreferencesGroup::builder().title(glib::markup_escape_text(&title)).build(), Vec::new()));
-                last_section = Some(b.section.clone());
-            }
-            let row = adw::ActionRow::builder()
-                .title(glib::markup_escape_text(&b.title()))
-                .activatable(true)
-                .build();
-            if b.prop("hotkey-overlay-title").is_some() {
-                row.set_subtitle(&glib::markup_escape_text(&b.action));
-                row.set_subtitle_lines(1);
-            }
-            row.add_suffix(&keycaps(&b.key));
-            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        // Rows are created in chunks: the first screenful right away, the
+        // rest while the main loop is idle, so opening the page never stalls.
+        const CHUNK: usize = 25;
+        let generation = self.generation.get() + 1;
+        self.generation.set(generation);
+        let binds = Rc::new(data.binds);
+        let next = Rc::new(Cell::new(0usize));
+        let last_section: Rc<RefCell<Option<String>>> = Rc::default();
+        let step = {
             let st = self.clone();
-            let bind = b.clone();
-            row.connect_activated(move |_| edit_dialog(&st, Some(bind.clone())));
-            let hay = format!("{} {} {}", b.key, b.title(), b.action).to_lowercase();
-            let g = current.as_mut().unwrap();
-            g.0.add(&row);
-            g.1.push((row, hay));
+            move || -> glib::ControlFlow {
+                if st.generation.get() != generation {
+                    return glib::ControlFlow::Break;
+                }
+                let start = next.get();
+                let end = (start + CHUNK).min(binds.len());
+                super::timed(
+                    || format!("shortcut rows {start}..{end}"),
+                    || {
+                        for b in &binds[start..end] {
+                            st.add_bind_row(b, &mut last_section.borrow_mut());
+                        }
+                        st.filter();
+                    },
+                );
+                next.set(end);
+                if end == binds.len() { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+            }
+        };
+        if step() == glib::ControlFlow::Continue {
+            glib::idle_add_local(step);
         }
-        if let Some(g) = current.take() {
-            self.prefs.add(&g.0);
-            self.groups.borrow_mut().push(g);
+    }
+
+    /// Append one bind, starting a new group when its section changes.
+    fn add_bind_row(self: &Rc<Self>, b: &Bind, last_section: &mut Option<String>) {
+        if last_section.as_ref() != Some(&b.section) {
+            let title = if b.section.is_empty() { "Shortcuts".to_string() } else { b.section.clone() };
+            let g = adw::PreferencesGroup::builder().title(glib::markup_escape_text(&title)).build();
+            self.prefs.add(&g);
+            self.groups.borrow_mut().push((g, Vec::new()));
+            *last_section = Some(b.section.clone());
         }
-        self.filter();
+        let row = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&b.title()))
+            .activatable(true)
+            .build();
+        if b.prop("hotkey-overlay-title").is_some() {
+            row.set_subtitle(&glib::markup_escape_text(&b.action));
+            row.set_subtitle_lines(1);
+        }
+        row.add_suffix(&keycaps(&b.key));
+        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let st = self.clone();
+        let bind = b.clone();
+        row.connect_activated(move |_| edit_dialog(&st, Some(bind.clone())));
+        let hay = format!("{} {} {}", b.key, b.title(), b.action).to_lowercase();
+        let mut groups = self.groups.borrow_mut();
+        let g = groups.last_mut().unwrap();
+        g.0.add(&row);
+        g.1.push((row, hay));
     }
 
     fn filter(&self) {

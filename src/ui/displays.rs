@@ -161,26 +161,61 @@ fn fill(ctx: &Ctx, page: &adw::PreferencesPage, outputs: Vec<Output>) {
             }
         })
     };
-    let mut setters = HashMap::new();
-    for (o, key) in outputs.iter().zip(&keys) {
-        let (g, set_pos) = output_group(ctx, o, key, outputs.len() == 1, redraw.clone());
-        setters.insert(key.clone(), set_pos);
-        stack.add_titled(&g, Some(&o.name), &o.name).set_icon_name(Some("video-display-symbolic"));
+    // Each tab's settings are built the first time it's shown. Position
+    // fields of built tabs are kept in sync with the arrangement.
+    let setters: Rc<RefCell<HashMap<String, PosSetter>>> = Rc::default();
+    let bins: Vec<adw::Bin> = outputs
+        .iter()
+        .map(|o| {
+            let bin = adw::Bin::new();
+            stack.add_titled(&bin, Some(&o.name), &o.name).set_icon_name(Some("video-display-symbolic"));
+            bin
+        })
+        .collect();
+    let arrangement_outputs: Vec<(String, String, Option<Logical>)> =
+        outputs.iter().zip(&keys).map(|(o, k)| (o.name.clone(), k.clone(), o.logical)).collect();
+    let count = outputs.len();
+    let build_tab = {
+        let (ctx, setters, keys, redraw) = (ctx.clone(), setters.clone(), keys.clone(), redraw.clone());
+        let outputs = Rc::new(outputs);
+        move |i: usize| {
+            if bins[i].child().is_some() {
+                return;
+            }
+            let (g, set_pos) = super::timed(
+                || format!("build display tab '{}'", outputs[i].name),
+                || output_group(&ctx, &outputs[i], &keys[i], count == 1, redraw.clone()),
+            );
+            setters.borrow_mut().insert(keys[i].clone(), set_pos);
+            bins[i].set_child(Some(&g));
+        }
+    };
+    if count > 0 {
+        build_tab(0);
+    }
+    {
+        let names: Vec<String> = arrangement_outputs.iter().map(|(n, _, _)| n.clone()).collect();
+        stack.connect_visible_child_name_notify(move |st| {
+            let Some(name) = st.visible_child_name() else { return };
+            if let Some(i) = names.iter().position(|n| *n == name) {
+                build_tab(i);
+            }
+        });
     }
 
-    if outputs.len() > 1 {
+    if count > 1 {
         let g = widgets::group("Arrangement", "Drag displays to place them next to each other");
-        let arr = Arrangement::new(ctx, &outputs, &keys, setters, stack.clone());
+        let arr = Arrangement::new(ctx, &arrangement_outputs, setters, stack.clone());
         g.add(&arr.frame);
         page.add(&g);
         *arrangement.borrow_mut() = Some(arr.clone());
         // Redraw when the selected tab changes, so it's highlighted.
         stack.connect_visible_child_name_notify(move |_| arr.area.queue_draw());
     }
-    if !outputs.is_empty() {
+    if count > 0 {
         let g = adw::PreferencesGroup::new();
         let tabs = gtk::Box::new(gtk::Orientation::Vertical, 18);
-        if outputs.len() > 1 {
+        if count > 1 {
             let switcher = adw::InlineViewSwitcher::builder().stack(&stack).halign(gtk::Align::Center).build();
             tabs.append(&switcher);
         }
@@ -465,17 +500,22 @@ pub struct Arrangement {
     screens: Vec<Screen>,
     pub area: gtk::DrawingArea,
     pub frame: gtk::Frame,
-    setters: HashMap<String, PosSetter>,
+    setters: Rc<RefCell<HashMap<String, PosSetter>>>,
     stack: adw::ViewStack,
     drag: RefCell<Option<Drag>>,
 }
 
 impl Arrangement {
-    fn new(ctx: &Ctx, outputs: &[Output], keys: &[String], setters: HashMap<String, PosSetter>, stack: adw::ViewStack) -> Rc<Self> {
+    /// `outputs`: (connector name, config key, live geometry) per display.
+    fn new(
+        ctx: &Ctx,
+        outputs: &[(String, String, Option<Logical>)],
+        setters: Rc<RefCell<HashMap<String, PosSetter>>>,
+        stack: adw::ViewStack,
+    ) -> Rc<Self> {
         let screens = outputs
             .iter()
-            .zip(keys)
-            .filter_map(|(o, k)| o.logical.map(|live| Screen { name: o.name.clone(), key: k.clone(), live }))
+            .filter_map(|(n, k, l)| l.map(|live| Screen { name: n.clone(), key: k.clone(), live }))
             .collect();
         let area = gtk::DrawingArea::builder().content_height(240).hexpand(true).build();
         let frame = gtk::Frame::builder().child(&area).css_classes(["view"]).build();
@@ -636,7 +676,7 @@ impl Arrangement {
             .map(|(k, x, y)| (vec![kdl::keyed("output", k), "position".into()], format!("position x={x} y={y}")))
             .collect();
         let setters: Vec<(PosSetter, i64, i64)> =
-            placed.iter().filter_map(|(k, x, y)| self.setters.get(k).map(|s| (s.clone(), *x, *y))).collect();
+            placed.iter().filter_map(|(k, x, y)| self.setters.borrow().get(k).map(|s| (s.clone(), *x, *y))).collect();
         let area = self.area.clone();
         self.ctx.apply(
             move |s| {
