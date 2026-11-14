@@ -500,6 +500,7 @@ fn edit_dialog(state: &Rc<PageState>, existing: Option<Bind>) {
     labels.push("Custom action (raw KDL)".into());
     let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
     let action_row = adw::ComboRow::builder().title("Action").model(&model).enable_search(true).build();
+    super::widgets::unclip(&action_row);
     action_row.set_search_match_mode(gtk::StringFilterMatchMode::Substring);
     action_row.set_expression(Some(gtk::PropertyExpression::new(
         gtk::StringObject::static_type(),

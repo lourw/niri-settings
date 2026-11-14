@@ -466,6 +466,7 @@ impl State {
             .subtitle("Show a black box instead when the screen is shared or captured")
             .model(&gtk::StringList::new(&block_opts.iter().map(|o| o.0).collect::<Vec<_>>()))
             .build();
+        widgets::unclip(&block);
         block.set_selected(block_opts.iter().position(|o| o.1 == rule.block_out.as_deref()).unwrap_or(0) as u32);
         row.add_row(&block);
         for o in &rule.other {
@@ -641,6 +642,7 @@ impl CondRow {
             .title("Condition")
             .model(&gtk::StringList::new(&["Match", "Exclude"]))
             .build();
+        widgets::unclip(&kind);
         kind.set_selected(c.exclude as u32);
         let remove = gtk::Button::builder()
             .icon_name("user-trash-symbolic")
@@ -733,6 +735,7 @@ fn tri_row(label: &str, sub: &str, v: Option<bool>) -> adw::ComboRow {
         .subtitle(sub)
         .model(&gtk::StringList::new(&["Don't change", "Yes", "No"]))
         .build();
+    widgets::unclip(&row);
     row.set_selected(match v {
         None => 0,
         Some(true) => 1,
@@ -746,6 +749,7 @@ fn size_rows_for(label: &str, v: Option<Size>) -> (adw::ComboRow, adw::SpinRow) 
         .title(label)
         .model(&gtk::StringList::new(&["Don't change", "Percent of screen", "Fixed pixels", "Let the app decide"]))
         .build();
+    widgets::unclip(&combo);
     let spin = adw::SpinRow::with_range(1.0, 10000.0, 1.0);
     let (sel, val) = match v {
         None => (0, 50.0),

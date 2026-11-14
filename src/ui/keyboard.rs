@@ -223,6 +223,7 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         labels.extend(fam.iter().map(|o| db.option_desc(o)));
         let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
         let row = adw::ComboRow::builder().title(*title).model(&model).build();
+        widgets::unclip(&row);
         row.set_enable_search(true);
         row.set_search_match_mode(gtk::StringFilterMatchMode::Substring);
         row.set_expression(Some(gtk::PropertyExpression::new(

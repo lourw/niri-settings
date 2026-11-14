@@ -317,6 +317,7 @@ fn animation(ctx: &Ctx, key: &str, label: &str, def: Curve) -> adw::ExpanderRow 
             .model(&gtk::StringList::new(&[default_label, "Spring", "Easing"]))
             .selected(kind)
             .build();
+        widgets::unclip(&kind_row);
         row.add_row(&kind_row);
 
         let (sd, ss, se) = match def {

@@ -152,8 +152,8 @@ pub fn combo(
         .title(title)
         .subtitle(subtitle)
         .model(&model)
-        .list_factory(&unellipsized_list_factory())
         .build();
+    unclip(&row);
     row.set_selected(selected.unwrap() as u32);
     let ctx = ctx.clone();
     let last = Rc::new(Cell::new(selected.unwrap() as u32));
@@ -184,29 +184,57 @@ pub fn combo(
     row
 }
 
-/// Popup item factory that shows full labels (wrapping if needed) instead of
-/// AdwComboRow's default ellipsized ones.
-fn unellipsized_list_factory() -> gtk::SignalListItemFactory {
+/// Stop a combo row from cutting off long labels: the popup list wraps them
+/// (keeping the checkmark on the current choice) and the selected value on
+/// the row wraps onto another line instead of being ellipsized.
+pub fn unclip(row: &adw::ComboRow) {
+    row.set_factory(Some(&label_factory(false)));
+    row.set_list_factory(Some(&label_factory(true)));
+}
+
+fn label_factory(in_popup: bool) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
+    factory.connect_setup(move |_, item| {
         let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
         let label = gtk::Label::builder()
-            .xalign(0.0)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .max_width_chars(40)
+            .hexpand(true)
             .build();
-        item.set_child(Some(&label));
+        if in_popup {
+            label.set_xalign(0.0);
+            label.set_max_width_chars(40);
+            let check = gtk::Image::from_icon_name("object-select-symbolic");
+            let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            b.append(&label);
+            b.append(&check);
+            // The popup's selection mirrors the row's selected item.
+            item.connect_selected_notify(move |it| check.set_opacity(if it.is_selected() { 1.0 } else { 0.0 }));
+            item.set_child(Some(&b));
+        } else {
+            label.set_xalign(1.0);
+            label.set_justify(gtk::Justification::Right);
+            label.set_max_width_chars(24);
+            item.set_child(Some(&label));
+        }
     });
-    factory.connect_bind(|_, item| {
+    factory.connect_bind(move |_, item| {
         let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
-        let (Some(label), Some(obj)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<gtk::StringObject>(),
-        ) else {
-            return;
+        let Some(obj) = item.item().and_downcast::<gtk::StringObject>() else { return };
+        let child = item.child();
+        let label = if in_popup {
+            child.and_then(|b| b.first_child()).and_downcast::<gtk::Label>()
+        } else {
+            child.and_downcast::<gtk::Label>()
         };
-        label.set_label(&obj.string());
+        if let Some(label) = label {
+            label.set_label(&obj.string());
+        }
+        if in_popup {
+            if let Some(check) = item.child().and_then(|b| b.last_child()) {
+                check.set_opacity(if item.is_selected() { 1.0 } else { 0.0 });
+            }
+        }
     });
     factory
 }
@@ -471,8 +499,8 @@ pub fn node_combo(
         .title(title)
         .subtitle(subtitle)
         .model(&gtk::StringList::new(&labels))
-        .list_factory(&unellipsized_list_factory())
         .build();
+    unclip(&row);
     row.set_selected(selected as u32);
     let values: Vec<Option<String>> = options.into_iter().map(|(_, v)| v).collect();
     let ctx = ctx.clone();

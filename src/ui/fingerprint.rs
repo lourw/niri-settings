@@ -288,6 +288,7 @@ impl FpPage {
         }
         let model = gtk::StringList::new(&available.iter().map(|(_, l)| *l).collect::<Vec<_>>());
         let pick = adw::ComboRow::builder().title("Finger").model(&model).build();
+        super::widgets::unclip(&pick);
         self.add(&self.enroll_group, &pick);
         let enroll = adw::ButtonRow::builder()
             .title("Enroll Fingerprint…")
