@@ -45,6 +45,9 @@ pub struct Output {
     pub vrr_supported: bool,
     /// Live logical geometry, when the output is enabled.
     pub logical: Option<Logical>,
+    /// Current mode's size in physical pixels, already rotated by the live
+    /// transform.
+    pub physical: Option<(u64, u64)>,
 }
 
 impl Output {
@@ -72,7 +75,24 @@ fn parse_outputs(json: &str) -> Vec<Output> {
     let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from);
     let mut outputs: Vec<Output> = map
         .values()
-        .map(|o| Output {
+        .map(|o| {
+            let rotated = o
+                .pointer("/logical/transform")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t.contains("90") || t.contains("270"));
+            let physical = o
+                .get("current_mode")
+                .and_then(|i| i.as_u64())
+                .and_then(|i| o.get("modes")?.get(i as usize))
+                .map(|m| {
+                    let d = |k: &str| m.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                    if rotated { (d("height"), d("width")) } else { (d("width"), d("height")) }
+                })
+                .filter(|(w, h)| *w > 0 && *h > 0);
+            (o, physical)
+        })
+        .map(|(o, physical)| Output {
+            physical,
             name: s(o, "name").unwrap_or_default(),
             make: s(o, "make").unwrap_or_default(),
             model: s(o, "model").unwrap_or_default(),
@@ -174,8 +194,8 @@ fn fill(ctx: &Ctx, page: &adw::PreferencesPage, outputs: Vec<Output>) {
             bin
         })
         .collect();
-    let arrangement_outputs: Vec<(String, String, Option<Logical>)> =
-        outputs.iter().zip(&keys).map(|(o, k)| (o.name.clone(), k.clone(), o.logical)).collect();
+    let arrangement_outputs: Vec<ArrangedOutput> =
+        outputs.iter().zip(&keys).map(|(o, k)| (o.name.clone(), k.clone(), o.logical, o.physical)).collect();
     let count = outputs.len();
     let build_tab = {
         let enable_rows = enable_rows.clone();
@@ -197,7 +217,7 @@ fn fill(ctx: &Ctx, page: &adw::PreferencesPage, outputs: Vec<Output>) {
         build_tab(0);
     }
     {
-        let names: Vec<String> = arrangement_outputs.iter().map(|(n, _, _)| n.clone()).collect();
+        let names: Vec<String> = arrangement_outputs.iter().map(|(n, ..)| n.clone()).collect();
         stack.connect_visible_child_name_notify(move |st| {
             let Some(name) = st.visible_child_name() else { return };
             if let Some(i) = names.iter().position(|n| *n == name) {
@@ -621,10 +641,27 @@ fn snap(r: Rect, others: &[Rect]) -> (f64, f64) {
     best.map(|b| b.0).unwrap_or((r.x.round(), r.y.round()))
 }
 
+/// (connector name, config key, live geometry, physical size).
+type ArrangedOutput = (String, String, Option<Logical>, Option<(u64, u64)>);
+
 struct Screen {
     name: String,
     key: String,
     live: Logical,
+    physical: Option<(u64, u64)>,
+}
+
+/// Logical size of a display, rounded up the way niri does: 2880 px at scale
+/// 1.75 is 1646 wide, not the 1645 niri reports. Snapping to the reported
+/// size leaves a 1px overlap and niri ignores the position.
+fn logical_size(physical: Option<(u64, u64)>, live: &Logical, scale: f64) -> (f64, f64) {
+    match physical {
+        Some((w, h)) => ((w as f64 / scale).ceil(), (h as f64 / scale).ceil()),
+        None => {
+            let ratio = live.scale / scale;
+            ((live.w as f64 * ratio).max(1.0), (live.h as f64 * ratio).max(1.0))
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -653,16 +690,17 @@ pub struct Arrangement {
 }
 
 impl Arrangement {
-    /// `outputs`: (connector name, config key, live geometry) per display.
+    /// `outputs`: (connector name, config key, live geometry, physical size)
+    /// per display.
     fn new(
         ctx: &Ctx,
-        outputs: &[(String, String, Option<Logical>)],
+        outputs: &[ArrangedOutput],
         setters: Rc<RefCell<HashMap<String, PosSetter>>>,
         stack: adw::ViewStack,
     ) -> Rc<Self> {
         let screens = outputs
             .iter()
-            .filter_map(|(n, k, l)| l.map(|live| Screen { name: n.clone(), key: k.clone(), live }))
+            .filter_map(|(n, k, l, ph)| l.map(|live| Screen { name: n.clone(), key: k.clone(), live, physical: *ph }))
             .collect();
         let area = gtk::DrawingArea::builder().content_height(240).hexpand(true).build();
         let frame = gtk::Frame::builder().child(&area).css_classes(["view"]).build();
@@ -731,18 +769,10 @@ impl Arrangement {
                 }
                 let pos = s.get(&[&base, "position"]);
                 let prop = |k: &str| pos.and_then(|n| n.prop(k)).and_then(Value::as_f64);
-                let ratio = s
-                    .value(&[&base, "scale"])
-                    .and_then(|v| v.as_f64())
-                    .filter(|v| *v > 0.0)
-                    .map(|cfg| sc.live.scale / cfg)
-                    .unwrap_or(1.0);
-                Some(Rect {
-                    x: prop("x").unwrap_or(sc.live.x as f64),
-                    y: prop("y").unwrap_or(sc.live.y as f64),
-                    w: (sc.live.w as f64 * ratio).max(1.0),
-                    h: (sc.live.h as f64 * ratio).max(1.0),
-                })
+                let scale =
+                    s.value(&[&base, "scale"]).and_then(|v| v.as_f64()).filter(|v| *v > 0.0).unwrap_or(sc.live.scale);
+                let (w, h) = logical_size(sc.physical, &sc.live, scale);
+                Some(Rect { x: prop("x").unwrap_or(sc.live.x as f64), y: prop("y").unwrap_or(sc.live.y as f64), w, h })
             })
             .collect()
     }
@@ -883,5 +913,12 @@ mod tests {
         assert_eq!(o[0].modes[0].kdl(), "2880x1920@120.000");
         assert_eq!(o[0].logical, Some(Logical { x: 0, y: 0, w: 1440, h: 960, scale: 2.0 }));
         assert!(o[0].vrr_supported);
+        assert_eq!(o[0].physical, Some((2880, 1920)));
+    }
+
+    #[test]
+    fn logical_size_rounds_up_like_niri() {
+        let live = Logical { x: 0, y: 0, w: 1645, h: 1097, scale: 1.75 };
+        assert_eq!(logical_size(Some((2880, 1920)), &live, 1.75), (1646.0, 1098.0));
     }
 }
