@@ -4,6 +4,8 @@
 
 A GTK4 / libadwaita settings app for the [niri](https://github.com/YaLTeR/niri) Wayland compositor. It edits your existing `config.kdl` in place, so you can keep hand-editing the file alongside it.
 
+![The Keyboard page: layouts, special keys and typing settings](docs/screenshots/keyboard.png)
+
 Pages:
 
 - **Keyboard**
@@ -17,6 +19,12 @@ Pages:
 - **Startup Apps**: programs and shell commands launched with niri
 - **Shortcuts**: view and edit keybinds
 - **Fingerprint**: enroll and remove fingerprints through `fprintd`
+
+| Appearance | Window Rules | Shortcuts |
+| --- | --- | --- |
+| ![Appearance page](docs/screenshots/appearance.png) | ![Window Rules page](docs/screenshots/rules.png) | ![Shortcuts page](docs/screenshots/shortcuts.png) |
+
+Planned work, such as layer rules, tablet input and blur, is tracked in [the issues](https://github.com/lourw/niri-settings/issues).
 
 ## Requirements
 
@@ -84,6 +92,12 @@ To render every page to PNGs (handy for checking layout changes):
 
 ```sh
 NIRI_SETTINGS_SCREENSHOT=/tmp/shots cargo run
+```
+
+The README screenshots are rendered from a demo config so they don't show anyone's personal setup:
+
+```sh
+NIRI_CONFIG=docs/screenshots/demo-config.kdl NIRI_SETTINGS_SCREENSHOT=/tmp/shots cargo run --release
 ```
 
 The app ID is `io.github.NiriSettings` (`APP_ID` in `src/main.rs`). The `.desktop` file and icon in `data/` are named after it so niri can match the window to its launcher icon. If you change the ID, rename those files and update `install.sh` too.
