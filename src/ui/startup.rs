@@ -86,17 +86,34 @@ impl State {
         for item in items {
             g.add(&self.item_row(item));
         }
-        let add_app = adw::ButtonRow::builder().title("Add Application…").start_icon_name("list-add-symbolic").build();
-        let add_cmd = adw::ButtonRow::builder().title("Add Command…").start_icon_name("utilities-terminal-symbolic").build();
+        // Add from installed apps, searched inline.
+        let cmds: Vec<String>;
+        let items: Vec<widgets::PickItem>;
+        (cmds, items) = self
+            .apps
+            .iter()
+            .filter_map(|a| {
+                let cmd = app_command(a)?;
+                let item = widgets::PickItem {
+                    title: a.display_name().to_string(),
+                    subtitle: cmd.clone(),
+                    icon: a.icon(),
+                    hay: format!("{} {}", a.display_name(), a.id().unwrap_or_default()).to_lowercase(),
+                };
+                Some((cmd, item))
+            })
+            .unzip();
+        let st = self.clone();
+        let on_pick = Rc::new(move |i: usize| st.add(&cmds[i]));
+        g.add(&widgets::search_picker("Add Application…", "list-add-symbolic", Rc::new(items), on_pick));
+        // Or type a command.
+        let add_cmd = adw::EntryRow::builder().title("Add a command").show_apply_button(true).build();
+        add_cmd.add_prefix(&gtk::Image::from_icon_name("utilities-terminal-symbolic"));
+        add_cmd.set_tooltip_text(Some("Shell syntax such as pipes, && or $VARS runs through sh -c"));
         {
             let st = self.clone();
-            add_app.connect_activated(move |_| st.app_picker());
+            add_cmd.connect_apply(move |e| st.add(&e.text()));
         }
-        {
-            let st = self.clone();
-            add_cmd.connect_activated(move |_| st.command_dialog(None));
-        }
-        g.add(&add_app);
         g.add(&add_cmd);
         self.page.add(&g);
         *self.group.borrow_mut() = Some(g);
@@ -112,9 +129,16 @@ impl State {
         })
     }
 
-    fn item_row(self: &Rc<Self>, item: Item) -> adw::ActionRow {
+    fn add(self: &Rc<Self>, cmd: &str) {
+        let Some(text) = node_for(cmd) else { return };
+        let st = self.clone();
+        self.ctx.apply(move |s| s.add_item(&text), move |_| st.rebuild());
+    }
+
+    /// An entry as an expander holding its editable command line.
+    fn item_row(self: &Rc<Self>, item: Item) -> adw::ExpanderRow {
         let cmd = command_text(&item);
-        let row = adw::ActionRow::builder().activatable(true).build();
+        let row = adw::ExpanderRow::builder().build();
         match self.app_for(&cmd) {
             Some(app) => {
                 row.set_title(&glib::markup_escape_text(&app.display_name()));
@@ -136,116 +160,29 @@ impl State {
                 row.add_prefix(&img);
             }
         }
-        let rm = gtk::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .tooltip_text("Remove")
-            .valign(gtk::Align::Center)
-            .css_classes(["flat"])
-            .build();
-        {
-            let (st, item) = (self.clone(), item.clone());
-            rm.connect_clicked(move |_| {
+        let st = self.clone();
+        widgets::lazy_rows(&row, move |row| {
+            let entry = adw::EntryRow::builder().title("Command").text(&cmd).show_apply_button(true).build();
+            entry.set_tooltip_text(Some("Shell syntax such as pipes, && or $VARS runs through sh -c"));
+            {
+                let (st, item) = (st.clone(), item.clone());
+                entry.connect_apply(move |e| {
+                    let Some(text) = node_for(&e.text()) else { return };
+                    let item = item.clone();
+                    let st2 = st.clone();
+                    st.ctx.apply(move |s| s.edit_item(&item, Some(text)), move |_| st2.rebuild());
+                });
+            }
+            row.add_row(&entry);
+            let rm = adw::ButtonRow::builder().title("Remove").css_classes(["destructive-action"]).build();
+            rm.connect_activated(move |_| {
                 let item = item.clone();
                 let st2 = st.clone();
                 st.ctx.apply(move |s| s.edit_item(&item, None), move |_| st2.rebuild());
             });
-        }
-        row.add_suffix(&rm);
-        {
-            let st = self.clone();
-            row.connect_activated(move |_| st.command_dialog(Some(item.clone())));
-        }
+            row.add_row(&rm);
+        });
         row
-    }
-
-    /// Add (None) or edit a command line.
-    fn command_dialog(self: &Rc<Self>, existing: Option<Item>) {
-        let dialog = adw::AlertDialog::new(
-            Some(if existing.is_some() { "Edit Startup Command" } else { "Add Startup Command" }),
-            Some("Shell syntax such as pipes, && or $VARS runs through sh -c."),
-        );
-        let entry = gtk::Entry::builder().activates_default(true).hexpand(true).build();
-        if let Some(item) = &existing {
-            entry.set_text(&command_text(item));
-        }
-        dialog.set_extra_child(Some(&entry));
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("save", if existing.is_some() { "Save" } else { "Add" });
-        dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("save"));
-        dialog.set_close_response("cancel");
-        let st = self.clone();
-        dialog.connect_response(None, move |_, resp| {
-            if resp != "save" {
-                return;
-            }
-            let Some(text) = node_for(&entry.text()) else { return };
-            let st2 = st.clone();
-            match existing.clone() {
-                Some(item) => st.ctx.apply(move |s| s.edit_item(&item, Some(text)), move |_| st2.rebuild()),
-                None => st.ctx.apply(move |s| s.add_item(&text), move |_| st2.rebuild()),
-            }
-        });
-        dialog.present(Some(&self.ctx.window));
-    }
-
-    fn app_picker(self: &Rc<Self>) {
-        let dialog = adw::Dialog::builder().title("Add Application").content_width(420).content_height(560).build();
-        let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
-        let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search applications")
-            .margin_start(12)
-            .margin_end(12)
-            .margin_bottom(6)
-            .build();
-        toolbar.add_top_bar(&search);
-        let list = gtk::ListBox::builder()
-            .css_classes(["boxed-list"])
-            .selection_mode(gtk::SelectionMode::None)
-            .margin_start(12)
-            .margin_end(12)
-            .margin_top(6)
-            .margin_bottom(12)
-            .valign(gtk::Align::Start)
-            .build();
-        let mut rows = Vec::new();
-        for app in &self.apps {
-            let Some(cmd) = app_command(app) else { continue };
-            let row = adw::ActionRow::builder()
-                .title(glib::markup_escape_text(&app.display_name()))
-                .subtitle(glib::markup_escape_text(&cmd))
-                .subtitle_lines(1)
-                .activatable(true)
-                .build();
-            if let Some(icon) = app.icon() {
-                let img = gtk::Image::from_gicon(&icon);
-                img.set_pixel_size(32);
-                row.add_prefix(&img);
-            }
-            let (st, d) = (self.clone(), dialog.clone());
-            row.connect_activated(move |_| {
-                d.close();
-                let Some(text) = node_for(&cmd) else { return };
-                let st2 = st.clone();
-                st.ctx.apply(move |s| s.add_item(&text), move |_| st2.rebuild());
-            });
-            let hay = format!("{} {}", app.display_name(), app.id().unwrap_or_default()).to_lowercase();
-            list.append(&row);
-            rows.push((row, hay));
-        }
-        search.connect_search_changed(move |e| {
-            let q = e.text().to_lowercase();
-            for (row, hay) in &rows {
-                row.set_visible(q.split_whitespace().all(|w| hay.contains(w)));
-            }
-        });
-        toolbar.set_content(Some(
-            &gtk::ScrolledWindow::builder().child(&list).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build(),
-        ));
-        dialog.set_child(Some(&toolbar));
-        dialog.present(Some(&self.ctx.window));
-        search.grab_focus();
     }
 }
 

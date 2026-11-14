@@ -168,28 +168,26 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
                     .build();
                 layouts_box.append(&row);
             }
-            let add = adw::ButtonRow::builder().title("Add Layout…").start_icon_name("list-add-symbolic").build();
+            // Inline search over every layout and variant.
+            let (choices, items) = layout_choices(&db);
             let ctx2 = ctx.clone();
-            let db2 = db.clone();
             let rb = rebuild_ref.clone();
-            add.connect_activated(move |_| {
-                let ctx3 = ctx2.clone();
+            let on_pick = Rc::new(move |i: usize| {
+                let (layout, variant) = choices[i].clone();
                 let rb = rb.clone();
-                layout_picker(&ctx2, &db2, move |layout, variant| {
-                    let rb = rb.clone();
-                    edit_layouts(
-                        &ctx3,
-                        move |l| {
-                            if !l.iter().any(|(a, b)| *a == layout && *b == variant) {
-                                l.push((layout, variant));
-                            }
-                        },
-                        move || {
-                            if let Some(f) = rb.borrow().as_ref() { f() }
-                        },
-                    );
-                });
+                edit_layouts(
+                    &ctx2,
+                    move |l| {
+                        if !l.iter().any(|(a, b)| *a == layout && *b == variant) {
+                            l.push((layout, variant));
+                        }
+                    },
+                    move || {
+                        if let Some(f) = rb.borrow().as_ref() { f() }
+                    },
+                );
             });
+            let add = widgets::search_picker("Add Layout…", "list-add-symbolic", items, on_pick);
             layouts_box.append(&add);
         }));
     }
@@ -376,31 +374,9 @@ fn edit_options(ctx: &Ctx, f: impl FnOnce(&mut Vec<String>) + Send + 'static) {
     });
 }
 
-/// Searchable dialog listing every layout and variant.
-fn layout_picker(ctx: &Ctx, db: &Rc<XkbDb>, on_pick: impl Fn(String, String) + 'static) {
-    let dialog = adw::Dialog::builder().title("Add Layout").content_width(460).content_height(600).build();
-    let toolbar = adw::ToolbarView::new();
-    let header = adw::HeaderBar::new();
-    toolbar.add_top_bar(&header);
-    let search = gtk::SearchEntry::builder().placeholder_text("Search layouts").hexpand(true).build();
-    let search_bar = gtk::Box::builder()
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(6)
-        .margin_bottom(6)
-        .build();
-    search_bar.append(&search);
-    toolbar.add_top_bar(&search_bar);
-
-    let list = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .css_classes(["boxed-list"])
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(6)
-        .margin_bottom(12)
-        .valign(gtk::Align::Start)
-        .build();
+/// Every layout and variant as (layout, variant) plus picker entries,
+/// sorted by description.
+fn layout_choices(db: &XkbDb) -> (Vec<(String, String)>, Rc<Vec<widgets::PickItem>>) {
     let mut entries: Vec<(String, String, String)> = Vec::new();
     for (l, d) in &db.layouts {
         entries.push((l.clone(), String::new(), d.clone()));
@@ -408,44 +384,15 @@ fn layout_picker(ctx: &Ctx, db: &Rc<XkbDb>, on_pick: impl Fn(String, String) + '
     for (l, v, d) in &db.variants {
         entries.push((l.clone(), v.clone(), d.clone()));
     }
-    entries.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()));
-    let on_pick = Rc::new(on_pick);
-    let keys: Rc<Vec<String>> =
-        Rc::new(entries.iter().map(|(l, v, d)| format!("{d} {l} {v}").to_lowercase()).collect());
-    for (l, v, d) in entries {
-        let subtitle = if v.is_empty() { l.clone() } else { format!("{l} · {v}") };
-        let row = adw::ActionRow::builder()
-            .title(glib_escape(&d))
-            .subtitle(&subtitle)
-            .activatable(true)
-            .build();
-        let on_pick = on_pick.clone();
-        let dialog2 = dialog.clone();
-        row.connect_activated(move |_| {
-            on_pick(l.clone(), v.clone());
-            dialog2.close();
-        });
-        list.append(&row);
-    }
-    {
-        let search = search.clone();
-        list.set_filter_func(move |row| {
-            let q = search.text().to_lowercase();
-            if q.is_empty() {
-                return true;
-            }
-            keys.get(row.index() as usize)
-                .map(|h| q.split_whitespace().all(|w| h.contains(w)))
-                .unwrap_or(true)
-        });
-    }
-    {
-        let list = list.clone();
-        search.connect_search_changed(move |_| list.invalidate_filter());
-    }
-    let scroller = gtk::ScrolledWindow::builder().child(&list).vexpand(true).build();
-    toolbar.set_content(Some(&scroller));
-    dialog.set_child(Some(&toolbar));
-    dialog.present(Some(&ctx.window));
-    search.grab_focus();
+    entries.sort_by_cached_key(|e| e.2.to_lowercase());
+    let items = entries
+        .iter()
+        .map(|(l, v, d)| widgets::PickItem {
+            title: d.clone(),
+            subtitle: if v.is_empty() { l.clone() } else { format!("{l} · {v}") },
+            icon: None,
+            hay: format!("{d} {l} {v}").to_lowercase(),
+        })
+        .collect();
+    (entries.into_iter().map(|(l, v, _)| (l, v)).collect(), Rc::new(items))
 }

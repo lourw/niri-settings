@@ -61,9 +61,10 @@ impl State {
             let next = items.get(i + 1).filter(|n| n.file == item.file);
             g.add(&self.row(item, prev, next));
         }
-        let add = adw::ButtonRow::builder().title("Add Workspace…").start_icon_name("list-add-symbolic").build();
+        let add = adw::EntryRow::builder().title("Add workspace").show_apply_button(true).build();
+        add.add_prefix(&gtk::Image::from_icon_name("list-add-symbolic"));
         let st = self.clone();
-        add.connect_activated(move |_| st.add_dialog());
+        add.connect_apply(move |e| st.add(e.text().trim()));
         g.add(&add);
         self.page.add(&g);
         *self.group.borrow_mut() = Some(g);
@@ -149,26 +150,13 @@ impl State {
         row
     }
 
-    fn add_dialog(self: &Rc<Self>) {
-        let dialog = adw::AlertDialog::new(Some("Add Workspace"), None);
-        let entry = gtk::Entry::builder().placeholder_text("Name").activates_default(true).build();
-        dialog.set_extra_child(Some(&entry));
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("add", "Add");
-        dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("add"));
-        dialog.set_close_response("cancel");
+    fn add(self: &Rc<Self>, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        let text = format!("{NAME} {}", kdl::quote(name));
         let st = self.clone();
-        dialog.connect_response(None, move |_, resp| {
-            let name = entry.text().trim().to_string();
-            if resp != "add" || name.is_empty() {
-                return;
-            }
-            let text = format!("{NAME} {}", kdl::quote(&name));
-            let st2 = st.clone();
-            st.ctx.apply(move |s| s.add_item(&text), move |_| st2.rebuild());
-        });
-        dialog.present(Some(&self.ctx.window));
+        self.ctx.apply(move |s| s.add_item(&text), move |_| st.rebuild());
     }
 }
 

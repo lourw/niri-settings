@@ -399,6 +399,97 @@ pub fn lazy_rows(row: &adw::ExpanderRow, build: impl FnOnce(&adw::ExpanderRow) +
     }));
 }
 
+/// One choice in a [`search_picker`].
+pub struct PickItem {
+    pub title: String,
+    pub subtitle: String,
+    pub icon: Option<gtk::gio::Icon>,
+    /// Lowercased text matched against the search words.
+    pub hay: String,
+}
+
+/// An expander with a search box listing matching items; picking one calls
+/// `on_pick` with its index and collapses the row. Only the first few
+/// matches get rows, so even thousands of items stay cheap.
+pub fn search_picker(
+    title: &str,
+    icon: &str,
+    items: Rc<Vec<PickItem>>,
+    on_pick: Rc<dyn Fn(usize)>,
+) -> adw::ExpanderRow {
+    const SHOWN: usize = 30;
+    let row = adw::ExpanderRow::builder().title(title).build();
+    row.add_prefix(&gtk::Image::from_icon_name(icon));
+    let row2 = row.clone();
+    lazy_rows(&row, move |row| {
+        let row_outer = row2;
+        let search = gtk::SearchEntry::builder().placeholder_text("Search").hexpand(true).build();
+        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
+        let more = gtk::Label::builder().css_classes(["dim-label", "caption"]).xalign(0.0).visible(false).build();
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        content.append(&search);
+        content.append(&list);
+        content.append(&more);
+        row.add_row(&content);
+
+        let fill = {
+            let (list, more, items, on_pick) = (list.clone(), more.clone(), items.clone(), on_pick.clone());
+            let row_outer = row_outer.clone();
+            move |q: &str| super::timed(|| format!("search picker results for {q:?}"), || {
+                while let Some(c) = list.first_child() {
+                    list.remove(&c);
+                }
+                let words: Vec<String> = q.to_lowercase().split_whitespace().map(String::from).collect();
+                let mut matches = items.iter().enumerate().filter(|(_, it)| words.iter().all(|w| it.hay.contains(w.as_str())));
+                for (i, it) in matches.by_ref().take(SHOWN) {
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&it.title))
+                        .subtitle(glib::markup_escape_text(&it.subtitle))
+                        .subtitle_lines(1)
+                        .activatable(true)
+                        .build();
+                    if let Some(icon) = &it.icon {
+                        let img = gtk::Image::from_gicon(icon);
+                        img.set_pixel_size(32);
+                        r.add_prefix(&img);
+                    }
+                    let (on_pick, row_outer) = (on_pick.clone(), row_outer.clone());
+                    r.connect_activated(move |_| {
+                        row_outer.set_expanded(false);
+                        on_pick(i);
+                    });
+                    list.append(&r);
+                }
+                let rest = matches.count();
+                more.set_visible(rest > 0);
+                more.set_label(&format!("{rest} more — refine your search"));
+                list.set_visible(list.first_child().is_some());
+            })
+        };
+        fill("");
+        let deb = Debouncer::default();
+        search.connect_search_changed(move |e| {
+            let (q, fill) = (e.text().to_string(), fill.clone());
+            deb.run(120, move || fill(&q));
+        });
+        let s2 = search.clone();
+        row_outer.connect_expanded_notify(move |r| {
+            if r.is_expanded() {
+                s2.grab_focus();
+            }
+        });
+        search.grab_focus();
+    });
+    row
+}
+
 pub fn group(title: &str, description: &str) -> adw::PreferencesGroup {
     let g = adw::PreferencesGroup::builder().title(gtk::glib::markup_escape_text(title)).build();
     if !description.is_empty() {
