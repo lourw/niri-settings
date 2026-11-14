@@ -166,7 +166,8 @@ fn build_window(app: &adw::Application) {
         Rc::new(move |i: usize| {
             let p = &PAGES[i];
             if stack.child_by_name(p.id).is_none() {
-                stack.add_named(&(p.build)(&ctx), Some(p.id));
+                let page = ui::timed(|| format!("build page '{}'", p.id), || (p.build)(&ctx));
+                stack.add_named(&page, Some(p.id));
             }
             stack.set_visible_child_name(p.id);
         })

@@ -18,6 +18,26 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Debug builds: log how long `f` took to stderr, flagging anything slower
+/// than a 60 Hz frame. Release builds just run `f`.
+#[inline]
+pub fn timed<T>(label: impl FnOnce() -> String, f: impl FnOnce() -> T) -> T {
+    #[cfg(debug_assertions)]
+    {
+        let start = std::time::Instant::now();
+        let out = f();
+        let took = start.elapsed();
+        let slow = if took > std::time::Duration::from_millis(16) { " SLOW" } else { "" };
+        eprintln!("[timing]{slow} {} took {took:.2?}", label());
+        out
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = label;
+        f()
+    }
+}
+
 type Job = Box<dyn FnOnce(&mut ConfigStore) -> Result<(), String> + Send>;
 type Reply = async_channel::Sender<Result<(), String>>;
 
@@ -57,11 +77,16 @@ pub struct Ctx {
 impl Ctx {
     /// Run an edit on the worker thread. `done(ok)` runs on the main thread
     /// afterwards (failures have already been reported to the user).
+    #[track_caller]
     pub fn apply(
         &self,
         job: impl FnOnce(&mut ConfigStore) -> Result<(), String> + Send + 'static,
         done: impl FnOnce(bool) + 'static,
     ) {
+        // Runs on the worker, so a slow edit doesn't stutter the UI; logged
+        // (in debug builds) with the code that asked for it.
+        let caller = std::panic::Location::caller();
+        let job = move |s: &mut ConfigStore| timed(|| format!("config edit from {caller} (worker)"), || job(s));
         let (reply_tx, reply_rx) = async_channel::bounded(1);
         if self.worker.tx.send_blocking((Box::new(job), reply_tx)).is_err() {
             self.error("Couldn't apply setting", "The background worker stopped.");
@@ -71,7 +96,7 @@ impl Ctx {
         let ctx = self.clone();
         glib::spawn_future_local(async move {
             let res = reply_rx.recv().await.unwrap_or_else(|_| Err("The background worker stopped.".into()));
-            let _ = ctx.store.borrow_mut().reload();
+            let _ = timed(|| "reload after edit".into(), || ctx.store.borrow_mut().reload());
             match res {
                 Ok(()) => done(true),
                 Err(e) => {
@@ -83,6 +108,7 @@ impl Ctx {
     }
 
     /// Fire-and-forget variant.
+    #[track_caller]
     pub fn apply_quiet(&self, job: impl FnOnce(&mut ConfigStore) -> Result<(), String> + Send + 'static) {
         self.apply(job, |_| {});
     }

@@ -78,6 +78,8 @@ cargo build
 cargo run
 ```
 
+Debug builds log UI-thread timings to stderr (page builds, the reload after each edit, and background edits), marking anything over one frame (16 ms) as `SLOW`. Release builds compile this out.
+
 To render every page to PNGs (handy for checking layout changes):
 
 ```sh

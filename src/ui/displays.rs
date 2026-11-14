@@ -135,7 +135,7 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
     let (ctx, p) = (ctx.clone(), page.clone());
     gtk::glib::spawn_future_local(async move {
         let outputs = connected_outputs_async().await;
-        fill(&ctx, &p, outputs);
+        super::timed(|| "fill displays page".into(), || fill(&ctx, &p, outputs));
     });
     page
 }

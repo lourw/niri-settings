@@ -163,6 +163,11 @@ pub fn combo(
             return;
         }
         let i = row.selected();
+        // GTK can re-emit `selected` without a change (e.g. when search is
+        // enabled); don't turn that into a config write.
+        if i == last.get() {
+            return;
+        }
         let Some(v) = values.get(i as usize).cloned() else { return };
         let p = p.clone();
         let (row, guard, last) = (row.clone(), guard.clone(), last.clone());
@@ -478,6 +483,11 @@ pub fn node_combo(
             return;
         }
         let i = row.selected();
+        // GTK can re-emit `selected` without a change (e.g. when search is
+        // enabled); don't turn that into a config write.
+        if i == last.get() {
+            return;
+        }
         let Some(v) = values.get(i as usize).cloned() else { return };
         let p = p.clone();
         let (row, guard, last) = (row.clone(), guard.clone(), last.clone());
