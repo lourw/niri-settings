@@ -111,6 +111,13 @@ impl ConfigStore {
         self.value(path).and_then(|v| v.as_str().map(String::from))
     }
 
+    /// Children of the node at `path`, each with its source text.
+    pub fn children_src(&self, path: &[&str]) -> Vec<(Node, String)> {
+        let Some((fi, node)) = self.find(path) else { return Vec::new() };
+        let text = &self.files[fi].doc.text;
+        node.children().iter().map(|c| (c.clone(), text[c.span()].to_string())).collect()
+    }
+
     pub fn set_flag(&mut self, path: &[&str], on: bool) -> Result<(), String> {
         let name = path.last().unwrap();
         self.set_node(path, on.then(|| kdl::ident(name)))
@@ -417,6 +424,77 @@ mod tests {
 
         // Backups were made.
         assert!(dir.join("backups/cfg/input.kdl").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The node shapes the Layout and Appearance pages write are accepted by
+    /// niri and undo cleanly.
+    #[test]
+    fn layout_and_appearance_edits() {
+        let src = home().join(".config/niri");
+        if !src.join("config.kdl").exists() || Command::new("niri").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-layout");
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir(&src, &dir);
+        let mut s = ConfigStore::load_from(dir.join("config.kdl")).unwrap();
+        s.backup_dir = dir.join("backups");
+        let snapshot = |d: &Path| -> Vec<String> {
+            let mut v: Vec<_> = std::fs::read_dir(d.join("cfg")).unwrap().flatten().map(|e| e.path()).collect();
+            v.sort();
+            v.iter().map(|p| std::fs::read_to_string(p).unwrap()).chain([std::fs::read_to_string(d.join("config.kdl")).unwrap()]).collect()
+        };
+        let before = snapshot(&dir);
+        let paths: Vec<&[&str]> = vec![
+
+            &["layout", "focus-ring", "off"][..], &["layout", "border", "active-color"], &["layout", "border", "on"],
+            &["layout", "shadow", "draw-behind-window"], &["layout", "shadow", "on"], &["layout", "default-column-width"],
+            &["layout", "preset-window-heights"], &["layout", "default-column-display"],
+            &["layout", "tab-indicator", "position"], &["animations", "off"],
+            &["animations", "slowdown"], &["overview", "zoom"], &["overview", "workspace-shadow", "off"],
+            &["gestures", "hot-corners", "off"], &["clipboard", "disable-primary"],
+            &["config-notification", "disable-failed"], &["hotkey-overlay", "hide-not-bound"],
+            &["layout", "focus-ring", "on"], &["layout", "border", "off"],
+        ];
+        let src_of = |s: &ConfigStore, p: &[&str]| s.find(p).map(|(fi, n)| s.files[fi].doc.text[n.span()].to_string());
+        let originals: Vec<Option<String>> = paths.iter().map(|p| src_of(&s, p)).collect();
+
+        // on/off blocks
+        s.set_nodes(&[(&["layout", "focus-ring", "on"], None), (&["layout", "focus-ring", "off"], Some("off".into()))]).unwrap();
+        assert!(s.flag(&["layout", "focus-ring", "off"]));
+        s.set_nodes(&[(&["layout", "border", "on"], Some("on".into())), (&["layout", "border", "off"], None)]).unwrap();
+        s.set_value(&["layout", "border", "active-color"], Some(Value::String("#11223380".into()))).unwrap();
+        s.set_flag(&["layout", "shadow", "on"], true).unwrap();
+        s.set_value(&["layout", "shadow", "draw-behind-window"], Some(Value::Bool(true))).unwrap();
+        // node combos and presets
+        s.set_node(&["layout", "default-column-width"], Some("default-column-width {}".into())).unwrap();
+        s.set_node(&["layout", "default-column-width"], Some("default-column-width { proportion 0.75; }".into())).unwrap();
+        s.set_node(&["layout", "preset-window-heights"], Some("preset-window-heights { proportion 0.5; proportion 1.0; }".into())).unwrap();
+        s.set_node(&["layout", "default-column-display"], Some("default-column-display \"tabbed\"".into())).unwrap();
+        s.set_value(&["layout", "tab-indicator", "position"], Some(Value::String("top".into()))).unwrap();
+        // top-level toggles
+        s.set_flag(&["animations", "off"], true).unwrap();
+        s.set_value(&["animations", "slowdown"], Some(Value::Float(2.0))).unwrap();
+        s.set_value(&["overview", "zoom"], Some(Value::Float(0.4))).unwrap();
+        s.set_flag(&["overview", "workspace-shadow", "off"], true).unwrap();
+        s.set_flag(&["gestures", "hot-corners", "off"], true).unwrap();
+        s.set_flag(&["clipboard", "disable-primary"], true).unwrap();
+        s.set_flag(&["config-notification", "disable-failed"], true).unwrap();
+        s.set_flag(&["hotkey-overlay", "hide-not-bound"], true).unwrap();
+
+        // Undo everything: restore each node to what the config had before.
+        for (p, orig) in paths.iter().zip(originals) {
+            s.set_node(p, orig).unwrap();
+        }
+        let after = snapshot(&dir);
+        // Only blocks we created from scratch may linger (empty top-level sections).
+        for (a, b) in before.iter().zip(&after) {
+            if a != b {
+                let extra = b.replace(a.as_str(), "");
+                assert!(extra.chars().all(|c| c.is_whitespace() || "{}".contains(c) || c.is_alphabetic() || c == '-'), "unexpected leftover:\n{b}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

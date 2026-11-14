@@ -309,3 +309,209 @@ pub fn group(title: &str, description: &str) -> adw::PreferencesGroup {
     }
     g
 }
+
+/// Presence flag shown inverted: node present = off (e.g. `animations { off }`).
+pub fn off_switch(ctx: &Ctx, title: &str, subtitle: &str, p: Path) -> adw::SwitchRow {
+    let row = adw::SwitchRow::builder().title(title).subtitle(subtitle).build();
+    row.set_active(!ctx.store.borrow().flag(&refs(&p)));
+    let ctx = ctx.clone();
+    let guard = Rc::new(Cell::new(false));
+    row.connect_active_notify(move |row| {
+        if guard.get() {
+            return;
+        }
+        let on = row.is_active();
+        let p = p.clone();
+        let (row, guard) = (row.clone(), guard.clone());
+        ctx.apply(move |s| s.set_flag(&refs(&p), !on), move |ok| {
+            if !ok {
+                guard.set(true);
+                row.set_active(!on);
+                guard.set(false);
+            }
+        });
+    });
+    row
+}
+
+/// Expander for a block with `on`/`off` flags (`focus-ring`, `border`,
+/// `shadow`…). The enable switch writes `on` or `off` only when it differs
+/// from niri's default; sub-rows go inside via `add_row`.
+pub fn block_expander(ctx: &Ctx, title: &str, subtitle: &str, base: &[&str], default_on: bool) -> adw::ExpanderRow {
+    let on_p: Vec<String> = base.iter().map(|s| s.to_string()).chain(["on".into()]).collect();
+    let off_p: Vec<String> = base.iter().map(|s| s.to_string()).chain(["off".into()]).collect();
+    let enabled = {
+        let s = ctx.store.borrow();
+        let r = |p: &[String]| s.flag(&p.iter().map(String::as_str).collect::<Vec<_>>());
+        if r(&off_p) {
+            false
+        } else if r(&on_p) {
+            true
+        } else {
+            default_on
+        }
+    };
+    let row = adw::ExpanderRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .show_enable_switch(true)
+        .enable_expansion(enabled)
+        .build();
+    let ctx = ctx.clone();
+    let guard = Rc::new(Cell::new(false));
+    row.connect_enable_expansion_notify(move |row| {
+        if guard.get() {
+            return;
+        }
+        let on = row.enables_expansion();
+        let (on_p, off_p) = (on_p.clone(), off_p.clone());
+        let (row, guard) = (row.clone(), guard.clone());
+        ctx.apply(
+            move |s| {
+                let on_r: Vec<&str> = on_p.iter().map(String::as_str).collect();
+                let off_r: Vec<&str> = off_p.iter().map(String::as_str).collect();
+                s.set_nodes(&[
+                    (&on_r, (on && !default_on).then(|| "on".into())),
+                    (&off_r, (!on && default_on).then(|| "off".into())),
+                ])
+            },
+            move |ok| {
+                if !ok {
+                    guard.set(true);
+                    row.set_enable_expansion(!on);
+                    guard.set(false);
+                }
+            },
+        );
+    });
+    row
+}
+
+/// Combo whose options are whole node texts (None = remove the node).
+/// `selected` is the index matching the current config.
+pub fn node_combo(
+    ctx: &Ctx,
+    title: &str,
+    subtitle: &str,
+    p: Path,
+    options: Vec<(String, Option<String>)>,
+    selected: usize,
+) -> adw::ComboRow {
+    let labels: Vec<&str> = options.iter().map(|(l, _)| l.as_str()).collect();
+    let row = adw::ComboRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .model(&gtk::StringList::new(&labels))
+        .list_factory(&unellipsized_list_factory())
+        .build();
+    row.set_selected(selected as u32);
+    let values: Vec<Option<String>> = options.into_iter().map(|(_, v)| v).collect();
+    let ctx = ctx.clone();
+    let last = Rc::new(Cell::new(selected as u32));
+    let guard = Rc::new(Cell::new(false));
+    row.connect_selected_notify(move |row| {
+        if guard.get() {
+            return;
+        }
+        let i = row.selected();
+        let Some(v) = values.get(i as usize).cloned() else { return };
+        let p = p.clone();
+        let (row, guard, last) = (row.clone(), guard.clone(), last.clone());
+        ctx.apply(move |s| s.set_node(&refs(&p), v), move |ok| {
+            if ok {
+                last.set(i);
+            } else {
+                guard.set(true);
+                row.set_selected(last.get());
+                guard.set(false);
+            }
+        });
+    });
+    row
+}
+
+/// Hex form niri accepts: `#rrggbb`, or `#rrggbbaa` when translucent.
+pub fn rgba_hex(c: &gtk::gdk::RGBA) -> String {
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let (r, g, bl, a) = (b(c.red()), b(c.green()), b(c.blue()), b(c.alpha()));
+    if a == 255 { format!("#{r:02x}{g:02x}{bl:02x}") } else { format!("#{r:02x}{g:02x}{bl:02x}{a:02x}") }
+}
+
+/// A CSS color string with a color picker and reset-to-default button.
+pub fn color(ctx: &Ctx, title: &str, subtitle: &str, p: Path, default: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder().title(title).subtitle(subtitle).build();
+    let current = ctx.store.borrow().string(&refs(&p));
+    let parse = |s: &str| match s.trim() {
+        t if t.eq_ignore_ascii_case("transparent") => Some(gtk::gdk::RGBA::TRANSPARENT),
+        t => gtk::gdk::RGBA::parse(t).ok(),
+    };
+    let default_rgba = parse(default).unwrap_or(gtk::gdk::RGBA::BLACK);
+    let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::builder().with_alpha(true).build()));
+    button.set_valign(gtk::Align::Center);
+    button.set_rgba(&current.as_deref().and_then(parse).unwrap_or(default_rgba));
+    if let Some(c) = current.as_deref().filter(|c| parse(c).is_none()) {
+        // Something GTK can't parse; show it rather than pretending.
+        row.set_subtitle(&format!("Current value: {c}"));
+    }
+    let reset = reset_button("Reset to default");
+    reset.set_visible(current.is_some());
+    row.add_suffix(&button);
+    row.add_suffix(&reset);
+    row.set_activatable_widget(Some(&button));
+
+    let guard = Rc::new(Cell::new(false));
+    let deb = Debouncer::default();
+    {
+        let ctx = ctx.clone();
+        let p = p.clone();
+        let guard = guard.clone();
+        let reset = reset.clone();
+        button.connect_rgba_notify(move |b| {
+            if guard.get() {
+                return;
+            }
+            let hex = rgba_hex(&b.rgba());
+            let (ctx, p, reset) = (ctx.clone(), p.clone(), reset.clone());
+            deb.run(300, move || {
+                ctx.apply(move |s| s.set_value(&refs(&p), Some(Value::String(hex))), move |ok| {
+                    if ok {
+                        reset.set_visible(true);
+                    }
+                });
+            });
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        reset.connect_clicked(move |btn| {
+            let p = p.clone();
+            let (button, guard, btn) = (button.clone(), guard.clone(), btn.clone());
+            ctx.apply(move |s| s.set_value(&refs(&p), None), move |ok| {
+                if ok {
+                    guard.set(true);
+                    button.set_rgba(&default_rgba);
+                    guard.set(false);
+                    btn.set_visible(false);
+                }
+            });
+        });
+    }
+    row
+}
+
+/// String enum where the first option is niri's default: choosing it removes
+/// the node, and an explicit default value in the config also selects it.
+pub fn enum_combo(ctx: &Ctx, title: &str, subtitle: &str, p: Path, options: &[(&str, &str)]) -> adw::ComboRow {
+    let name = p.last().cloned().unwrap_or_default();
+    let current = ctx.store.borrow().string(&refs(&p));
+    let selected = current.as_deref().and_then(|c| options.iter().position(|(_, v)| *v == c)).unwrap_or(0);
+    let opts = options
+        .iter()
+        .enumerate()
+        .map(|(i, (l, v))| {
+            let text = (i > 0).then(|| format!("{} {}", crate::kdl::ident(&name), Value::String(v.to_string()).to_kdl()));
+            (l.to_string(), text)
+        })
+        .collect();
+    node_combo(ctx, title, subtitle, p, opts, selected)
+}

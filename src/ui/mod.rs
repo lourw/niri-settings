@@ -1,7 +1,9 @@
+pub mod appearance;
 pub mod fingerprint;
 pub mod general;
 pub mod keybinds;
 pub mod keyboard;
+pub mod layout;
 pub mod pointer;
 pub mod widgets;
 

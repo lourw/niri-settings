@@ -1,4 +1,4 @@
-//! Focus behaviour, modifier key, cursor theme.
+//! Focus behaviour, modifier key, desktop toggles, cursor theme.
 
 use super::widgets::{self, NumSpec};
 use super::{Ctx, path, refs};
@@ -53,6 +53,21 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         path(&["input", "disable-power-key-handling"]),
     ));
     page.add(&keys);
+
+    let desktop = widgets::group("Desktop", "");
+    desktop.add(&widgets::off_switch(
+        ctx,
+        "Hot corner",
+        "Open the overview by pushing the pointer into the top-left corner",
+        path(&["gestures", "hot-corners", "off"]),
+    ));
+    desktop.add(&widgets::off_switch(
+        ctx,
+        "Middle-click paste",
+        "Keep the primary selection (select text, paste with middle click)",
+        path(&["clipboard", "disable-primary"]),
+    ));
+    page.add(&desktop);
 
     let cursor = widgets::group("Cursor", "");
     cursor.add(&cursor_theme(ctx));
