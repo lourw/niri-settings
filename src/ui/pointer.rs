@@ -216,8 +216,26 @@ pub fn input_page(ctx: &Ctx) -> gtk::Widget {
         (Device::Trackpoint, "Trackpoint", "input-mouse-symbolic"),
         (Device::Trackball, "Trackball", "input-mouse-symbolic"),
     ];
-    for (dev, title, icon) in tabs {
-        stack.add_titled_with_icon(&page(ctx, dev), Some(dev.node()), title, icon);
+    // Only the first tab is built up front; the others on first view.
+    let mut bins = Vec::new();
+    for (i, (dev, title, icon)) in tabs.into_iter().enumerate() {
+        let bin = adw::Bin::new();
+        if i == 0 {
+            bin.set_child(Some(&page(ctx, dev)));
+        }
+        stack.add_titled_with_icon(&bin, Some(dev.node()), title, icon);
+        bins.push((dev, bin));
+    }
+    {
+        let ctx = ctx.clone();
+        stack.connect_visible_child_notify(move |stack| {
+            let Some(child) = stack.visible_child() else { return };
+            if let Some((dev, bin)) = bins.iter().find(|(_, b)| b.upcast_ref::<gtk::Widget>() == &child) {
+                if bin.child().is_none() {
+                    bin.set_child(Some(&page(&ctx, *dev)));
+                }
+            }
+        });
     }
     let switcher = adw::InlineViewSwitcher::builder()
         .stack(&stack)

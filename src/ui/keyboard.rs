@@ -98,7 +98,11 @@ fn split_list(s: &str) -> Vec<String> {
 
 pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
-    let db = Rc::new(XkbDb::load());
+    // Parsed once per run: the list is static and takes a while to parse.
+    thread_local! {
+        static DB: Rc<XkbDb> = Rc::new(XkbDb::load());
+    }
+    let db = DB.with(Rc::clone);
 
     // ── Layouts ──
     let layouts_group = widgets::group(

@@ -37,7 +37,10 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         &["layout", "insert-hint"],
         true,
     );
-    hint.add_row(&widgets::color(ctx, "Color", "", path(&["layout", "insert-hint", "color"]), "#ffc87f80"));
+    let c = ctx.clone();
+    widgets::lazy_rows(&hint, move |hint| {
+        hint.add_row(&widgets::color(&c, "Color", "", path(&["layout", "insert-hint", "color"]), "#ffc87f80"));
+    });
     colors.add(&hint);
     page.add(&colors);
 
@@ -75,12 +78,16 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         "#262626",
     ));
     let ws = widgets::block_expander(ctx, "Workspace shadows", "", &["overview", "workspace-shadow"], true);
-    let wsp = |leaf: &str| path(&["overview", "workspace-shadow", leaf]);
-    let px = |default: f64| NumSpec { min: 0.0, max: 500.0, step: 1.0, digits: 0, float: false, default };
-    ws.add_row(&widgets::spin(ctx, "Softness", "Blur radius", wsp("softness"), px(40.0)));
-    ws.add_row(&widgets::spin(ctx, "Spread", "", wsp("spread"), px(10.0)));
-    offset_rows(ctx, &ws, wsp("offset"), (0.0, 10.0));
-    ws.add_row(&widgets::color(ctx, "Color", "", wsp("color"), "#00000050"));
+    let c = ctx.clone();
+    widgets::lazy_rows(&ws, move |ws| {
+        let ctx = &c;
+        let wsp = |leaf: &str| path(&["overview", "workspace-shadow", leaf]);
+        let px = |default: f64| NumSpec { min: 0.0, max: 500.0, step: 1.0, digits: 0, float: false, default };
+        ws.add_row(&widgets::spin(ctx, "Softness", "Blur radius", wsp("softness"), px(40.0)));
+        ws.add_row(&widgets::spin(ctx, "Spread", "", wsp("spread"), px(10.0)));
+        offset_rows(ctx, ws, wsp("offset"), (0.0, 10.0));
+        ws.add_row(&widgets::color(ctx, "Color", "", wsp("color"), "#00000050"));
+    });
     overview.add(&ws);
     page.add(&overview);
 
@@ -111,31 +118,35 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
 /// `focus-ring` / `border`: width plus active, inactive and urgent colors.
 fn outline(ctx: &Ctx, name: &str, title: &str, subtitle: &str, default_on: bool, active: &str) -> adw::ExpanderRow {
     let row = widgets::block_expander(ctx, title, subtitle, &["layout", name], default_on);
-    row.add_row(&widgets::spin(
-        ctx,
-        "Width",
-        "",
-        path(&["layout", name, "width"]),
-        NumSpec { min: 0.0, max: 100.0, step: 1.0, digits: 0, float: false, default: 4.0 },
-    ));
-    let gradient_note = |kind: &str| {
-        let has = ctx.store.borrow().get(&["layout", name, &format!("{kind}-gradient")]).is_some();
-        if has { "The gradient below takes priority" } else { "" }
-    };
-    for (label, kind, default) in
-        [("Active color", "active", active), ("Inactive color", "inactive", "#505050"), ("Urgent color", "urgent", "#9b0000")]
-    {
-        row.add_row(&widgets::color(
+    let (ctx, name, active) = (ctx.clone(), name.to_string(), active.to_string());
+    widgets::lazy_rows(&row, move |row| {
+        let (ctx, name, active) = (&ctx, name.as_str(), active.as_str());
+        row.add_row(&widgets::spin(
             ctx,
-            label,
-            gradient_note(kind),
-            path(&["layout", name, &format!("{kind}-color")]),
-            default,
+            "Width",
+            "",
+            path(&["layout", name, "width"]),
+            NumSpec { min: 0.0, max: 100.0, step: 1.0, digits: 0, float: false, default: 4.0 },
         ));
-    }
-    for (label, kind, default) in [("Active gradient", "active", active), ("Inactive gradient", "inactive", "#505050")] {
-        row.add_row(&gradient(ctx, label, path(&["layout", name, &format!("{kind}-gradient")]), default));
-    }
+        let gradient_note = |kind: &str| {
+            let has = ctx.store.borrow().get(&["layout", name, &format!("{kind}-gradient")]).is_some();
+            if has { "The gradient below takes priority" } else { "" }
+        };
+        for (label, kind, default) in
+            [("Active color", "active", active), ("Inactive color", "inactive", "#505050"), ("Urgent color", "urgent", "#9b0000")]
+        {
+            row.add_row(&widgets::color(
+                ctx,
+                label,
+                gradient_note(kind),
+                path(&["layout", name, &format!("{kind}-color")]),
+                default,
+            ));
+        }
+        for (label, kind, default) in [("Active gradient", "active", active), ("Inactive gradient", "inactive", "#505050")] {
+            row.add_row(&gradient(ctx, label, path(&["layout", name, &format!("{kind}-gradient")]), default));
+        }
+    });
     row
 }
 
@@ -148,24 +159,29 @@ fn gradient(ctx: &Ctx, title: &str, p: Path, base: &str) -> adw::ExpanderRow {
         .show_enable_switch(true)
         .enable_expansion(on)
         .build();
-    let prop = |k: &'static str| Target::Prop(p.clone(), k);
-    row.add_row(&widgets::color(ctx, "From", "", prop("from"), base));
-    row.add_row(&widgets::color(ctx, "To", "", prop("to"), base));
-    row.add_row(&widgets::spin(
-        ctx,
-        "Angle",
-        "Degrees; 0 runs bottom to top, 90 left to right",
-        prop("angle"),
-        NumSpec { min: 0.0, max: 360.0, step: 15.0, digits: 0, float: false, default: 180.0 },
-    ));
-    row.add_row(&prop_switch(
-        ctx,
-        "Span the whole view",
-        "Stretch one gradient across the workspace instead of each window",
-        p.clone(),
-        "relative-to",
-        ("window", "workspace-view"),
-    ));
+    {
+        let (ctx, p, base) = (ctx.clone(), p.clone(), base.to_string());
+        widgets::lazy_rows(&row, move |row| {
+            let prop = |k: &'static str| Target::Prop(p.clone(), k);
+            row.add_row(&widgets::color(&ctx, "From", "", prop("from"), &base));
+            row.add_row(&widgets::color(&ctx, "To", "", prop("to"), &base));
+            row.add_row(&widgets::spin(
+                &ctx,
+                "Angle",
+                "Degrees; 0 runs bottom to top, 90 left to right",
+                prop("angle"),
+                NumSpec { min: 0.0, max: 360.0, step: 15.0, digits: 0, float: false, default: 180.0 },
+            ));
+            row.add_row(&prop_switch(
+                &ctx,
+                "Span the whole view",
+                "Stretch one gradient across the workspace instead of each window",
+                p.clone(),
+                "relative-to",
+                ("window", "workspace-view"),
+            ));
+        });
+    }
     let ctx = ctx.clone();
     let base = base.to_string();
     let guard = Rc::new(Cell::new(false));
@@ -286,143 +302,153 @@ fn animation(ctx: &Ctx, key: &str, label: &str, def: Curve) -> adw::ExpanderRow 
         });
     }
 
-    let default_label = match def {
-        Curve::Spring(..) => "Default (spring)",
-        Curve::Easing(..) => "Default (easing)",
-    };
-    let kind_row = adw::ComboRow::builder()
-        .title("Motion")
-        .subtitle("Springs feel physical; easing runs for a fixed time")
-        .model(&gtk::StringList::new(&[default_label, "Spring", "Easing"]))
-        .selected(kind)
-        .build();
-    row.add_row(&kind_row);
-
-    let (sd, ss, se) = match def {
-        Curve::Spring(d, s, e) => (d, s, e),
-        Curve::Easing(..) => (1.0, 800.0, 0.0001),
-    };
-    let (ed, ec) = match def {
-        Curve::Easing(d, c) => (d, c),
-        Curve::Spring(..) => (250.0, "ease-out-cubic"),
-    };
-    let sp = |k: &'static str| Target::Prop(ap("spring"), k);
-    let damping = widgets::spin(
-        ctx,
-        "Damping ratio",
-        "Below 1 bounces, 1 settles without bouncing",
-        sp("damping-ratio"),
-        NumSpec { min: 0.05, max: 10.0, step: 0.05, digits: 2, float: true, default: sd },
-    );
-    let stiffness = widgets::spin(
-        ctx,
-        "Stiffness",
-        "Higher is faster",
-        sp("stiffness"),
-        NumSpec { min: 1.0, max: 100_000.0, step: 50.0, digits: 0, float: false, default: ss },
-    );
-    let epsilon = widgets::spin(
-        ctx,
-        "Epsilon",
-        "How close to the end counts as finished",
-        sp("epsilon"),
-        NumSpec { min: 0.00001, max: 1.0, step: 0.0001, digits: 5, float: true, default: se },
-    );
-    let duration = widgets::spin(
-        ctx,
-        "Duration (ms)",
-        "",
-        ap("duration-ms"),
-        NumSpec { min: 1.0, max: 10_000.0, step: 10.0, digits: 0, float: false, default: ed },
-    );
-    let curve = widgets::combo(ctx, "Curve", "", ap("curve"), CURVES);
-    for r in [damping.upcast_ref::<gtk::Widget>(), stiffness.upcast_ref(), epsilon.upcast_ref(), duration.upcast_ref(), curve.upcast_ref()] {
-        row.add_row(r);
-    }
-    let show = {
-        let (damping, stiffness, epsilon, duration, curve) =
-            (damping.clone(), stiffness.clone(), epsilon.clone(), duration.clone(), curve.clone());
-        move |k: u32| {
-            for r in [&damping, &stiffness, &epsilon] {
-                r.set_visible(k == 1);
-            }
-            duration.set_visible(k == 2);
-            curve.set_visible(k == 2);
-        }
-    };
-    show(kind);
-
     let ctx = ctx.clone();
     let key = key.to_string();
-    let last = Rc::new(Cell::new(kind));
-    let guard = Rc::new(Cell::new(false));
-    kind_row.connect_selected_notify(move |kr| {
-        if guard.get() {
-            return;
-        }
-        let k = kr.selected();
-        // Write what the rows show, so switching back and forth keeps values.
-        let spring = (k == 1).then(|| {
-            format!(
-                "spring damping-ratio={} stiffness={} epsilon={}",
-                kdl::format_float(damping.value()),
-                stiffness.value().round() as i64,
-                kdl::format_float(epsilon.value()),
-            )
-        });
-        let dur = (k == 2).then(|| format!("duration-ms {}", duration.value().round() as i64));
-        let crv = (k == 2).then(|| format!("curve {}", kdl::quote(ec)));
-        let key = key.clone();
-        let (kr, guard, last, show) = (kr.clone(), guard.clone(), last.clone(), show.clone());
-        ctx.apply(
-            move |s| {
-                s.set_nodes(&[
-                    (&["animations", &key, "spring"], spring),
-                    (&["animations", &key, "duration-ms"], dur),
-                    (&["animations", &key, "curve"], crv),
-                ])
-            },
-            move |ok| {
-                if ok {
-                    last.set(k);
-                    show(k);
-                } else {
-                    guard.set(true);
-                    kr.set_selected(last.get());
-                    guard.set(false);
-                }
-            },
+    widgets::lazy_rows(&row, move |row| {
+        let (ctx, key) = (&ctx, key.as_str());
+        let ap = |leaf: &str| path(&["animations", key, leaf]);
+        let default_label = match def {
+            Curve::Spring(..) => "Default (spring)",
+            Curve::Easing(..) => "Default (easing)",
+        };
+        let kind_row = adw::ComboRow::builder()
+            .title("Motion")
+            .subtitle("Springs feel physical; easing runs for a fixed time")
+            .model(&gtk::StringList::new(&[default_label, "Spring", "Easing"]))
+            .selected(kind)
+            .build();
+        row.add_row(&kind_row);
+
+        let (sd, ss, se) = match def {
+            Curve::Spring(d, s, e) => (d, s, e),
+            Curve::Easing(..) => (1.0, 800.0, 0.0001),
+        };
+        let (ed, ec) = match def {
+            Curve::Easing(d, c) => (d, c),
+            Curve::Spring(..) => (250.0, "ease-out-cubic"),
+        };
+        let sp = |k: &'static str| Target::Prop(ap("spring"), k);
+        let damping = widgets::spin(
+            ctx,
+            "Damping ratio",
+            "Below 1 bounces, 1 settles without bouncing",
+            sp("damping-ratio"),
+            NumSpec { min: 0.05, max: 10.0, step: 0.05, digits: 2, float: true, default: sd },
         );
+        let stiffness = widgets::spin(
+            ctx,
+            "Stiffness",
+            "Higher is faster",
+            sp("stiffness"),
+            NumSpec { min: 1.0, max: 100_000.0, step: 50.0, digits: 0, float: false, default: ss },
+        );
+        let epsilon = widgets::spin(
+            ctx,
+            "Epsilon",
+            "How close to the end counts as finished",
+            sp("epsilon"),
+            NumSpec { min: 0.00001, max: 1.0, step: 0.0001, digits: 5, float: true, default: se },
+        );
+        let duration = widgets::spin(
+            ctx,
+            "Duration (ms)",
+            "",
+            ap("duration-ms"),
+            NumSpec { min: 1.0, max: 10_000.0, step: 10.0, digits: 0, float: false, default: ed },
+        );
+        let curve = widgets::combo(ctx, "Curve", "", ap("curve"), CURVES);
+        for r in [damping.upcast_ref::<gtk::Widget>(), stiffness.upcast_ref(), epsilon.upcast_ref(), duration.upcast_ref(), curve.upcast_ref()] {
+            row.add_row(r);
+        }
+        let show = {
+            let (damping, stiffness, epsilon, duration, curve) =
+                (damping.clone(), stiffness.clone(), epsilon.clone(), duration.clone(), curve.clone());
+            move |k: u32| {
+                for r in [&damping, &stiffness, &epsilon] {
+                    r.set_visible(k == 1);
+                }
+                duration.set_visible(k == 2);
+                curve.set_visible(k == 2);
+            }
+        };
+        show(kind);
+
+        let ctx = ctx.clone();
+        let key = key.to_string();
+        let last = Rc::new(Cell::new(kind));
+        let guard = Rc::new(Cell::new(false));
+        kind_row.connect_selected_notify(move |kr| {
+            if guard.get() {
+                return;
+            }
+            let k = kr.selected();
+            // Write what the rows show, so switching back and forth keeps values.
+            let spring = (k == 1).then(|| {
+                format!(
+                    "spring damping-ratio={} stiffness={} epsilon={}",
+                    kdl::format_float(damping.value()),
+                    stiffness.value().round() as i64,
+                    kdl::format_float(epsilon.value()),
+                )
+            });
+            let dur = (k == 2).then(|| format!("duration-ms {}", duration.value().round() as i64));
+            let crv = (k == 2).then(|| format!("curve {}", kdl::quote(ec)));
+            let key = key.clone();
+            let (kr, guard, last, show) = (kr.clone(), guard.clone(), last.clone(), show.clone());
+            ctx.apply(
+                move |s| {
+                    s.set_nodes(&[
+                        (&["animations", &key, "spring"], spring),
+                        (&["animations", &key, "duration-ms"], dur),
+                        (&["animations", &key, "curve"], crv),
+                    ])
+                },
+                move |ok| {
+                    if ok {
+                        last.set(k);
+                        show(k);
+                    } else {
+                        guard.set(true);
+                        kr.set_selected(last.get());
+                        guard.set(false);
+                    }
+                },
+            );
+        });
     });
     row
 }
 
 fn shadow(ctx: &Ctx) -> adw::ExpanderRow {
     let row = widgets::block_expander(ctx, "Shadow", "Drop shadow behind windows", &["layout", "shadow"], false);
-    let num = |default: f64| NumSpec { min: 0.0, max: 200.0, step: 1.0, digits: 0, float: false, default };
-    row.add_row(&widgets::spin(ctx, "Softness", "Blur radius", path(&["layout", "shadow", "softness"]), num(30.0)));
-    row.add_row(&widgets::spin(
-        ctx,
-        "Spread",
-        "How far the shadow extends",
-        path(&["layout", "shadow", "spread"]),
-        num(5.0),
-    ));
-    offset_rows(ctx, &row, path(&["layout", "shadow", "offset"]), (0.0, 5.0));
-    row.add_row(&widgets::color(ctx, "Color", "", path(&["layout", "shadow", "color"]), "#00000077"));
-    row.add_row(&widgets::color(
-        ctx,
-        "Inactive color",
-        "Defaults to the active color",
-        path(&["layout", "shadow", "inactive-color"]),
-        "#00000077",
-    ));
-    row.add_row(&widgets::bool_arg(
-        ctx,
-        "Draw behind window",
-        "Fixes shadows showing through windows with rounded or translucent corners",
-        path(&["layout", "shadow", "draw-behind-window"]),
-        false,
-    ));
+    let ctx = ctx.clone();
+    widgets::lazy_rows(&row, move |row| {
+        let ctx = &ctx;
+        let num = |default: f64| NumSpec { min: 0.0, max: 200.0, step: 1.0, digits: 0, float: false, default };
+        row.add_row(&widgets::spin(ctx, "Softness", "Blur radius", path(&["layout", "shadow", "softness"]), num(30.0)));
+        row.add_row(&widgets::spin(
+            ctx,
+            "Spread",
+            "How far the shadow extends",
+            path(&["layout", "shadow", "spread"]),
+            num(5.0),
+        ));
+        offset_rows(ctx, &row, path(&["layout", "shadow", "offset"]), (0.0, 5.0));
+        row.add_row(&widgets::color(ctx, "Color", "", path(&["layout", "shadow", "color"]), "#00000077"));
+        row.add_row(&widgets::color(
+            ctx,
+            "Inactive color",
+            "Defaults to the active color",
+            path(&["layout", "shadow", "inactive-color"]),
+            "#00000077",
+        ));
+        row.add_row(&widgets::bool_arg(
+            ctx,
+            "Draw behind window",
+            "Fixes shadows showing through windows with rounded or translucent corners",
+            path(&["layout", "shadow", "draw-behind-window"]),
+            false,
+        ));
+    });
     row
 }

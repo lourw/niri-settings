@@ -593,29 +593,35 @@ fn cond_popover(button: &gtk::MenuButton, add: Rc<dyn Fn(Cond)>) -> gtk::Popover
             while let Some(c) = list.first_child() {
                 list.remove(&c);
             }
-            let mut entries: Vec<(String, Cond)> =
-                vec![("Empty condition".into(), Cond { exclude: false, app_id: String::new(), title: String::new(), extra: vec![] })];
-            for (app, title) in open_windows() {
-                let label = if title.is_empty() { app.clone() } else { format!("{app} — {title}") };
-                entries.push((label, Cond { exclude: false, app_id: exact_regex(&app), title: String::new(), extra: vec![] }));
-            }
-            for (label, cond) in entries {
-                let l = gtk::Label::builder()
-                    .label(&label)
-                    .xalign(0.0)
-                    .ellipsize(gtk::pango::EllipsizeMode::End)
-                    .max_width_chars(50)
-                    .build();
-                let row = gtk::ListBoxRow::builder().child(&l).build();
-                let (pop, add) = (pop.clone(), add.clone());
-                let gesture = gtk::GestureClick::new();
-                gesture.connect_released(move |_, _, _, _| {
-                    pop.popdown();
-                    add(cond.clone());
-                });
-                row.add_controller(gesture);
-                list.append(&row);
-            }
+            let append = {
+                let (list, pop, add) = (list.clone(), pop.clone(), add.clone());
+                move |label: String, cond: Cond| {
+                    let l = gtk::Label::builder()
+                        .label(&label)
+                        .xalign(0.0)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .max_width_chars(50)
+                        .build();
+                    let row = gtk::ListBoxRow::builder().child(&l).build();
+                    let (pop, add) = (pop.clone(), add.clone());
+                    let gesture = gtk::GestureClick::new();
+                    gesture.connect_released(move |_, _, _, _| {
+                        pop.popdown();
+                        add(cond.clone());
+                    });
+                    row.add_controller(gesture);
+                    list.append(&row);
+                }
+            };
+            append("Empty condition".into(), Cond { exclude: false, app_id: String::new(), title: String::new(), extra: vec![] });
+            // Ask niri for open windows off the UI thread.
+            glib::spawn_future_local(async move {
+                let windows = gtk::gio::spawn_blocking(open_windows).await.unwrap_or_default();
+                for (app, title) in windows {
+                    let label = if title.is_empty() { app.clone() } else { format!("{app} — {title}") };
+                    append(label, Cond { exclude: false, app_id: exact_regex(&app), title: String::new(), extra: vec![] });
+                }
+            });
         }
     };
     let _ = button;

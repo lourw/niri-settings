@@ -28,14 +28,21 @@ struct State {
     ctx: Ctx,
     page: adw::PreferencesPage,
     group: RefCell<Option<adw::PreferencesGroup>>,
-    outputs: Vec<String>,
+    /// Connected output names; filled in asynchronously.
+    outputs: RefCell<Vec<String>>,
 }
 
 pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
-    let outputs = super::displays::connected_outputs().into_iter().map(|o| o.name).collect();
-    let st = Rc::new(State { ctx: ctx.clone(), page: page.clone(), group: RefCell::new(None), outputs });
+    let st = Rc::new(State { ctx: ctx.clone(), page: page.clone(), group: RefCell::new(None), outputs: RefCell::default() });
     st.rebuild();
+    gtk::glib::spawn_future_local(async move {
+        let names: Vec<String> = super::displays::connected_outputs_async().await.into_iter().map(|o| o.name).collect();
+        if !names.is_empty() {
+            *st.outputs.borrow_mut() = names;
+            st.rebuild();
+        }
+    });
     page
 }
 
@@ -89,7 +96,8 @@ impl State {
         row.add_row(&entry);
 
         let mut opts: Vec<(&str, Option<&str>)> = vec![("Any display", None)];
-        opts.extend(self.outputs.iter().map(|o| (o.as_str(), Some(o.as_str()))));
+        let outputs = self.outputs.borrow();
+        opts.extend(outputs.iter().map(|o| (o.as_str(), Some(o.as_str()))));
         let combo = widgets::combo(&self.ctx, "Display", "Where the workspace is created", out_p, &opts);
         {
             let row = row.clone();

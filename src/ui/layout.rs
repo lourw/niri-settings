@@ -223,66 +223,70 @@ fn tabs(ctx: &Ctx) -> adw::PreferencesGroup {
         &["layout", "tab-indicator"],
         true,
     );
-    ind.add_row(&widgets::enum_combo(
-        ctx,
-        "Position",
-        "",
-        path(&["layout", "tab-indicator", "position"]),
-        &[("Left", "left"), ("Right", "right"), ("Top", "top"), ("Bottom", "bottom")],
-    ));
-    ind.add_row(&widgets::switch(
-        ctx,
-        "Hide for a single tab",
-        "",
-        path(&["layout", "tab-indicator", "hide-when-single-tab"]),
-    ));
-    ind.add_row(&widgets::switch(
-        ctx,
-        "Place within column",
-        "Draw the indicator inside the column instead of in the gap",
-        path(&["layout", "tab-indicator", "place-within-column"]),
-    ));
-    let num = |default: f64, min: f64| NumSpec { min, max: 200.0, step: 1.0, digits: 0, float: false, default };
-    ind.add_row(&widgets::spin(ctx, "Width", "", path(&["layout", "tab-indicator", "width"]), num(4.0, 0.0)));
-    ind.add_row(&widgets::spin(
-        ctx,
-        "Gap to window",
-        "",
-        path(&["layout", "tab-indicator", "gap"]),
-        num(5.0, -200.0),
-    ));
-    ind.add_row(&widgets::spin(
-        ctx,
-        "Gap between tabs",
-        "",
-        path(&["layout", "tab-indicator", "gaps-between-tabs"]),
-        num(0.0, 0.0),
-    ));
-    ind.add_row(&widgets::spin(
-        ctx,
-        "Corner radius",
-        "",
-        path(&["layout", "tab-indicator", "corner-radius"]),
-        num(0.0, 0.0),
-    ));
-    ind.add_row(&widgets::spin(
-        ctx,
-        "Length",
-        "Fraction of the column the whole bar of tabs spans",
-        widgets::Target::Prop(path(&["layout", "tab-indicator", "length"]), "total-proportion"),
-        NumSpec { min: 0.05, max: 1.0, step: 0.05, digits: 2, float: true, default: 0.5 },
-    ));
-    for (label, kind, default) in
-        [("Active color", "active", "#7fc8ff"), ("Inactive color", "inactive", "#505050"), ("Urgent color", "urgent", "#9b0000")]
-    {
-        ind.add_row(&widgets::color(
+    let c = ctx.clone();
+    widgets::lazy_rows(&ind, move |row| {
+        let ctx = &c;
+        row.add_row(&widgets::enum_combo(
             ctx,
-            label,
-            "Defaults to the focus ring color",
-            path(&["layout", "tab-indicator", &format!("{kind}-color")]),
-            default,
+            "Position",
+            "",
+            path(&["layout", "tab-indicator", "position"]),
+            &[("Left", "left"), ("Right", "right"), ("Top", "top"), ("Bottom", "bottom")],
         ));
-    }
+        row.add_row(&widgets::switch(
+            ctx,
+            "Hide for a single tab",
+            "",
+            path(&["layout", "tab-indicator", "hide-when-single-tab"]),
+        ));
+        row.add_row(&widgets::switch(
+            ctx,
+            "Place within column",
+            "Draw the indicator inside the column instead of in the gap",
+            path(&["layout", "tab-indicator", "place-within-column"]),
+        ));
+        let num = |default: f64, min: f64| NumSpec { min, max: 200.0, step: 1.0, digits: 0, float: false, default };
+        row.add_row(&widgets::spin(ctx, "Width", "", path(&["layout", "tab-indicator", "width"]), num(4.0, 0.0)));
+        row.add_row(&widgets::spin(
+            ctx,
+            "Gap to window",
+            "",
+            path(&["layout", "tab-indicator", "gap"]),
+            num(5.0, -200.0),
+        ));
+        row.add_row(&widgets::spin(
+            ctx,
+            "Gap between tabs",
+            "",
+            path(&["layout", "tab-indicator", "gaps-between-tabs"]),
+            num(0.0, 0.0),
+        ));
+        row.add_row(&widgets::spin(
+            ctx,
+            "Corner radius",
+            "",
+            path(&["layout", "tab-indicator", "corner-radius"]),
+            num(0.0, 0.0),
+        ));
+        row.add_row(&widgets::spin(
+            ctx,
+            "Length",
+            "Fraction of the column the whole bar of tabs spans",
+            widgets::Target::Prop(path(&["layout", "tab-indicator", "length"]), "total-proportion"),
+            NumSpec { min: 0.05, max: 1.0, step: 0.05, digits: 2, float: true, default: 0.5 },
+        ));
+        for (label, kind, default) in
+            [("Active color", "active", "#7fc8ff"), ("Inactive color", "inactive", "#505050"), ("Urgent color", "urgent", "#9b0000")]
+        {
+            row.add_row(&widgets::color(
+                ctx,
+                label,
+                "Defaults to the focus ring color",
+                path(&["layout", "tab-indicator", &format!("{kind}-color")]),
+                default,
+            ));
+        }
+    });
     g.add(&ind);
     g
 }

@@ -125,9 +125,22 @@ const TRANSFORMS: &[(&str, &str)] = &[
     ("Flipped, 270°", "flipped-270"),
 ];
 
+/// Connected outputs, queried off the UI thread.
+pub async fn connected_outputs_async() -> Vec<Output> {
+    gtk::gio::spawn_blocking(connected_outputs).await.unwrap_or_default()
+}
+
 pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
-    let outputs = connected_outputs();
+    let (ctx, p) = (ctx.clone(), page.clone());
+    gtk::glib::spawn_future_local(async move {
+        let outputs = connected_outputs_async().await;
+        fill(&ctx, &p, outputs);
+    });
+    page
+}
+
+fn fill(ctx: &Ctx, page: &adw::PreferencesPage, outputs: Vec<Output>) {
 
     if outputs.is_empty() {
         let g = widgets::group(
@@ -213,7 +226,6 @@ pub fn page(ctx: &Ctx) -> adw::PreferencesPage {
         }
         page.add(&g);
     }
-    page
 }
 
 fn glib_escape(s: &str) -> String {

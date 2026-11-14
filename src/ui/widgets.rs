@@ -343,6 +343,29 @@ pub fn slider(ctx: &Ctx, title: &str, subtitle: &str, p: Path, min: f64, max: f6
 }
 
 
+/// Build an expander's rows the first time it's opened, so collapsed rows
+/// cost nothing when the page is created.
+pub fn lazy_rows(row: &adw::ExpanderRow, build: impl FnOnce(&adw::ExpanderRow) + 'static) {
+    if row.is_expanded() {
+        build(row);
+        return;
+    }
+    let build = RefCell::new(Some(build));
+    let id: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::default();
+    let id2 = id.clone();
+    *id.borrow_mut() = Some(row.connect_expanded_notify(move |row| {
+        if !row.is_expanded() {
+            return;
+        }
+        if let Some(b) = build.borrow_mut().take() {
+            b(row);
+        }
+        if let Some(h) = id2.borrow_mut().take() {
+            row.disconnect(h);
+        }
+    }));
+}
+
 pub fn group(title: &str, description: &str) -> adw::PreferencesGroup {
     let g = adw::PreferencesGroup::builder().title(gtk::glib::markup_escape_text(title)).build();
     if !description.is_empty() {

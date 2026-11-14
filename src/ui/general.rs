@@ -123,28 +123,50 @@ fn recent_windows(ctx: &Ctx) -> adw::PreferencesGroup {
     ));
 
     let hl = adw::ExpanderRow::builder().title("Highlight").subtitle("Frame around the selected window").build();
-    hl.add_row(&widgets::color(ctx, "Color", "", rw(&["highlight", "active-color"]), "#999999ff"));
-    hl.add_row(&widgets::color(ctx, "Urgent color", "", rw(&["highlight", "urgent-color"]), "#ff9999ff"));
-    let px = |default: f64| NumSpec { min: 0.0, max: 200.0, step: 1.0, digits: 0, float: false, default };
-    hl.add_row(&widgets::spin(ctx, "Padding", "", rw(&["highlight", "padding"]), px(30.0)));
-    hl.add_row(&widgets::spin(ctx, "Corner radius", "", rw(&["highlight", "corner-radius"]), px(0.0)));
+    {
+        let c = ctx.clone();
+        widgets::lazy_rows(&hl, move |row| {
+            let ctx = &c;
+            let rw = |leaf: &[&str]| {
+                let mut p = vec!["recent-windows"];
+                p.extend_from_slice(leaf);
+                path(&p)
+            };
+            row.add_row(&widgets::color(ctx, "Color", "", rw(&["highlight", "active-color"]), "#999999ff"));
+            row.add_row(&widgets::color(ctx, "Urgent color", "", rw(&["highlight", "urgent-color"]), "#ff9999ff"));
+            let px = |default: f64| NumSpec { min: 0.0, max: 200.0, step: 1.0, digits: 0, float: false, default };
+            row.add_row(&widgets::spin(ctx, "Padding", "", rw(&["highlight", "padding"]), px(30.0)));
+            row.add_row(&widgets::spin(ctx, "Corner radius", "", rw(&["highlight", "corner-radius"]), px(0.0)));
+        });
+    }
     g.add(&hl);
 
     let pv = adw::ExpanderRow::builder().title("Previews").subtitle("Window thumbnails").build();
-    pv.add_row(&widgets::spin(
-        ctx,
-        "Maximum height",
-        "Logical pixels",
-        rw(&["previews", "max-height"]),
-        NumSpec { min: 16.0, max: 4000.0, step: 10.0, digits: 0, float: false, default: 480.0 },
-    ));
-    pv.add_row(&widgets::spin(
-        ctx,
-        "Maximum scale",
-        "Previews never grow beyond this fraction of the window size",
-        rw(&["previews", "max-scale"]),
-        NumSpec { min: 0.05, max: 1.0, step: 0.05, digits: 2, float: true, default: 0.5 },
-    ));
+    {
+        let c = ctx.clone();
+        widgets::lazy_rows(&pv, move |row| {
+            let ctx = &c;
+            let rw = |leaf: &[&str]| {
+                let mut p = vec!["recent-windows"];
+                p.extend_from_slice(leaf);
+                path(&p)
+            };
+            row.add_row(&widgets::spin(
+                ctx,
+                "Maximum height",
+                "Logical pixels",
+                rw(&["previews", "max-height"]),
+                NumSpec { min: 16.0, max: 4000.0, step: 10.0, digits: 0, float: false, default: 480.0 },
+            ));
+            row.add_row(&widgets::spin(
+                ctx,
+                "Maximum scale",
+                "Previews never grow beyond this fraction of the window size",
+                rw(&["previews", "max-scale"]),
+                NumSpec { min: 0.05, max: 1.0, step: 0.05, digits: 2, float: true, default: 0.5 },
+            ));
+        });
+    }
     g.add(&pv);
     g
 }

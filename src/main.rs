@@ -157,33 +157,39 @@ fn build_window(app: &adw::Application) {
     bp.add_setter(&split, "collapsed", Some(&true.to_value()));
     window.add_breakpoint(bp);
 
-    let build_pages = {
+    // Pages are built the first time they're shown, so startup and reloads
+    // only pay for the visible one.
+    let current = Rc::new(std::cell::Cell::new(0usize));
+    let show_page = {
         let ctx = ctx.clone();
         let stack = stack.clone();
+        Rc::new(move |i: usize| {
+            let p = &PAGES[i];
+            if stack.child_by_name(p.id).is_none() {
+                stack.add_named(&(p.build)(&ctx), Some(p.id));
+            }
+            stack.set_visible_child_name(p.id);
+        })
+    };
+    let build_pages = {
+        let (stack, current, show_page) = (stack.clone(), current.clone(), show_page.clone());
         move || {
-            let visible = stack.visible_child_name();
             while let Some(c) = stack.first_child() {
                 stack.remove(&c);
             }
-            for p in PAGES {
-                stack.add_named(&(p.build)(&ctx), Some(p.id));
-            }
-            if let Some(v) = visible {
-                stack.set_visible_child_name(&v);
-            }
+            show_page(current.get());
         }
     };
-    build_pages();
 
     {
-        let stack = stack.clone();
         let split = split.clone();
         let content_page = content_page.clone();
         sidebar_list.connect_row_selected(move |_, row| {
             let Some(row) = row else { return };
-            let p = &PAGES[row.index() as usize];
-            stack.set_visible_child_name(p.id);
-            content_page.set_title(p.title);
+            let i = row.index() as usize;
+            current.set(i);
+            show_page(i);
+            content_page.set_title(PAGES[i].title);
             split.set_show_content(true);
         });
     }
