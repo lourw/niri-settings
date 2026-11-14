@@ -252,20 +252,15 @@ pub fn page(ctx: &Ctx) -> gtk::Widget {
     let prefs = adw::PreferencesPage::new();
     prefs.set_vexpand(true);
     root.append(&prefs);
-    let new_group = adw::PreferencesGroup::builder().title("New shortcut").visible(false).build();
-    prefs.add(&new_group);
 
     let state = Rc::new(PageState {
         ctx: ctx.clone(),
         prefs,
         search: search.clone(),
         groups: RefCell::new(Vec::new()),
-        new_group,
-        reopen: RefCell::new(None),
-        new_row: RefCell::new(None),
-        parts: RefCell::default(),
-        filling: Cell::new(false),
         generation: Cell::new(0),
+        rows: RefCell::default(),
+        filling: Cell::new(false),
     });
     state.rebuild();
 
@@ -275,65 +270,36 @@ pub fn page(ctx: &Ctx) -> gtk::Widget {
     }
     {
         let state = state.clone();
-        add.connect_clicked(move |_| state.add_new());
+        add.connect_clicked(move |_| edit_dialog(&state, None));
     }
     root.upcast()
 }
 
-/// A shortcut's row, kept so a save can update it without rebuilding the
-/// list (which would jump the page back to the top).
-struct RowParts {
-    row: adw::ExpanderRow,
-    /// The bind as last saved; None for a new, unsaved shortcut.
-    bind: RefCell<Option<Bind>>,
-    keycaps: RefCell<Option<gtk::Box>>,
-    /// Rows the form added, and signal handlers it connected on `row`.
-    form: RefCell<Vec<gtk::Widget>>,
-    handlers: RefCell<Vec<glib::SignalHandlerId>>,
-}
-
-impl RowParts {
-    fn new(row: adw::ExpanderRow, bind: Option<Bind>) -> Rc<Self> {
-        Rc::new(RowParts {
-            row,
-            bind: RefCell::new(bind),
-            keycaps: RefCell::new(None),
-            form: RefCell::default(),
-            handlers: RefCell::default(),
-        })
-    }
-
-    fn clear_form(&self) {
-        for w in self.form.borrow_mut().drain(..) {
-            self.row.remove(&w);
-        }
-        for h in self.handlers.borrow_mut().drain(..) {
-            self.row.disconnect(h);
-        }
-    }
+/// A shortcut's row, kept so a save can update it in place instead of
+/// rebuilding the list (which would jump the page back to the top).
+struct BindRow {
+    row: adw::ActionRow,
+    bind: RefCell<Bind>,
+    keycaps: RefCell<gtk::Box>,
+    arrow: gtk::Image,
 }
 
 struct PageState {
     ctx: Ctx,
     prefs: adw::PreferencesPage,
     search: gtk::SearchEntry,
-    groups: RefCell<Vec<(adw::PreferencesGroup, Vec<(adw::ExpanderRow, String)>)>>,
-    /// Holds an unsaved new shortcut, above the rest of the list.
-    new_group: adw::PreferencesGroup,
-    /// Key of a shortcut to show expanded after the next rebuild.
-    reopen: RefCell<Option<String>>,
-    new_row: RefCell<Option<Rc<RowParts>>>,
-    /// Every shortcut row on the page.
-    parts: RefCell<Vec<Rc<RowParts>>>,
-    /// A chunked fill is still adding rows.
-    filling: Cell<bool>,
+    groups: RefCell<Vec<(adw::PreferencesGroup, Vec<(adw::ActionRow, String)>)>>,
     /// Bumped on every rebuild so a still-running chunked fill stops.
     generation: Cell<u64>,
+    /// Every shortcut row on the page.
+    rows: RefCell<Vec<Rc<BindRow>>>,
+    /// A chunked fill is still adding rows.
+    filling: Cell<bool>,
 }
 
 impl PageState {
     fn rebuild(self: &Rc<Self>) {
-        self.parts.borrow_mut().clear();
+        self.rows.borrow_mut().clear();
         for (g, _) in self.groups.borrow_mut().drain(..) {
             self.prefs.remove(&g);
         }
@@ -349,7 +315,7 @@ impl PageState {
         }
         // Rows are created in chunks: the first screenful right away, the
         // rest while the main loop is idle, so opening the page never stalls.
-        const CHUNK: usize = 15;
+        const CHUNK: usize = 25;
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         let binds = Rc::new(data.binds);
@@ -396,124 +362,75 @@ impl PageState {
             self.groups.borrow_mut().push((g, Vec::new()));
             *last_section = Some(b.section.clone());
         }
-        let row = adw::ExpanderRow::builder().build();
-        row.set_subtitle_lines(1);
-        let parts = RowParts::new(row.clone(), Some(b.clone()));
-        self.set_header(&parts, b);
-        let (st, p) = (self.clone(), parts.clone());
-        super::widgets::lazy_rows(&row, move |_| {
-            let bind = p.bind.borrow().clone();
-            edit_form(&st, &p, bind);
-        });
-        if self.reopen.borrow().as_deref() == Some(b.key.as_str()) {
-            self.reopen.replace(None);
-            row.set_expanded(true);
+        let row = adw::ActionRow::builder().activatable(true).subtitle_lines(1).build();
+        let caps = keycaps(&b.key);
+        let arrow = gtk::Image::from_icon_name("go-next-symbolic");
+        row.add_suffix(&caps);
+        row.add_suffix(&arrow);
+        let br = Rc::new(BindRow { row: row.clone(), bind: RefCell::new(b.clone()), keycaps: RefCell::new(caps), arrow });
+        set_text(&br.row, b);
+        {
+            let (st, br) = (self.clone(), br.clone());
+            row.connect_activated(move |_| edit_dialog(&st, Some(br.bind.borrow().clone())));
         }
-        let hay = hay_for(b);
         let mut groups = self.groups.borrow_mut();
         let g = groups.last_mut().unwrap();
         g.0.add(&row);
-        g.1.push((row, hay));
-        self.parts.borrow_mut().push(parts);
+        g.1.push((row, hay_for(b)));
+        self.rows.borrow_mut().push(br);
     }
 
-    /// Title, subtitle and keycaps of a shortcut row.
-    fn set_header(&self, parts: &RowParts, b: &Bind) {
-        parts.row.set_title(&glib::markup_escape_text(&b.title()));
-        let sub = if b.prop("hotkey-overlay-title").is_some() { b.action.as_str() } else { "" };
-        parts.row.set_subtitle(&glib::markup_escape_text(sub));
-        if let Some(old) = parts.keycaps.borrow_mut().take() {
-            parts.row.remove(&old);
-        }
-        let caps = keycaps(&b.key);
-        parts.row.add_suffix(&caps);
-        *parts.keycaps.borrow_mut() = Some(caps);
+    fn find_row(&self, key: &str) -> Option<Rc<BindRow>> {
+        self.rows.borrow().iter().find(|r| r.bind.borrow().key == key).cloned()
     }
 
-    fn find_parts(&self, key: &str) -> Option<Rc<RowParts>> {
-        self.parts.borrow().iter().find(|p| p.bind.borrow().as_ref().is_some_and(|b| b.key == key)).cloned()
-    }
-
-    /// Take a row off the page.
-    fn remove_parts(&self, parts: &Rc<RowParts>) {
+    /// Take a shortcut's row off the page.
+    fn remove_row(&self, key: &str) {
+        let Some(br) = self.find_row(key) else { return };
         for (g, rows) in self.groups.borrow_mut().iter_mut() {
-            if let Some(i) = rows.iter().position(|(r, _)| *r == parts.row) {
-                g.remove(&parts.row);
+            if let Some(i) = rows.iter().position(|(r, _)| *r == br.row) {
+                g.remove(&br.row);
                 rows.remove(i);
             }
         }
-        self.parts.borrow_mut().retain(|p| !Rc::ptr_eq(p, parts));
+        self.rows.borrow_mut().retain(|r| !Rc::ptr_eq(r, &br));
         self.filter();
     }
 
-    /// The bind now in the config for `key`.
-    fn bind_for(&self, key: &str) -> Option<Bind> {
-        collect(&self.ctx).binds.into_iter().find(|b| b.key == key)
-    }
-
-    /// Show `b` (as now saved) in an existing row and rebuild its form.
-    fn refresh(self: &Rc<Self>, parts: &Rc<RowParts>, b: Bind) {
-        self.set_header(parts, &b);
-        for (_, rows) in self.groups.borrow_mut().iter_mut() {
-            if let Some(r) = rows.iter_mut().find(|(r, _)| *r == parts.row) {
-                r.1 = hay_for(&b);
-            }
+    /// After a save from the dialog: update rows in place.
+    fn after_save(self: &Rc<Self>, old_key: Option<&str>, new_key: &str, replaced: Option<&str>) {
+        if let Some(r) = replaced.filter(|r| Some(*r) != old_key) {
+            self.remove_row(r);
         }
-        *parts.bind.borrow_mut() = Some(b.clone());
-        let built = !parts.form.borrow().is_empty();
-        parts.clear_form();
-        if built {
-            edit_form(self, parts, Some(b));
-        }
-    }
-
-    /// After a save: update rows in place instead of rebuilding the list.
-    fn after_save(self: &Rc<Self>, parts: &Rc<RowParts>, key: &str, replaced: Option<String>) {
-        if let Some(p) = replaced.as_deref().and_then(|k| self.find_parts(k)) {
-            if !Rc::ptr_eq(&p, parts) {
-                self.remove_parts(&p);
-            }
-        }
-        let Some(b) = self.bind_for(key) else {
+        let Some(b) = collect(&self.ctx).binds.into_iter().find(|b| b.key == new_key) else {
             self.rebuild();
             return;
         };
-        if parts.bind.borrow().is_some() {
-            self.refresh(parts, b);
-            return;
+        match old_key.and_then(|k| self.find_row(k)) {
+            Some(br) => {
+                set_text(&br.row, &b);
+                let caps = keycaps(&b.key);
+                // Suffixes append, so re-add the arrow after the new keycaps.
+                br.row.remove(&*br.keycaps.borrow());
+                br.row.remove(&br.arrow);
+                br.row.add_suffix(&caps);
+                br.row.add_suffix(&br.arrow);
+                *br.keycaps.borrow_mut() = caps;
+                for (_, rows) in self.groups.borrow_mut().iter_mut() {
+                    if let Some(r) = rows.iter_mut().find(|(r, _)| *r == br.row) {
+                        r.1 = hay_for(&b);
+                    }
+                }
+                *br.bind.borrow_mut() = b;
+                self.filter();
+            }
+            // New shortcut: it was appended to the config, so append its row.
+            None if !self.filling.get() && !self.groups.borrow().is_empty() => {
+                self.add_bind_row(&b, &mut Some(b.section.clone()));
+                self.filter();
+            }
+            None => self.rebuild(),
         }
-        // A new shortcut: it was appended to the config, so append its row.
-        self.close_new();
-        if self.filling.get() || self.groups.borrow().is_empty() {
-            self.rebuild();
-            return;
-        }
-        self.add_bind_row(&b, &mut Some(b.section.clone()));
-        self.filter();
-    }
-
-    /// Show an unsaved shortcut, opened for editing, at the top.
-    fn add_new(self: &Rc<Self>) {
-        if let Some(p) = self.new_row.borrow().clone() {
-            p.row.set_expanded(true);
-            return;
-        }
-        let row = adw::ExpanderRow::builder().title("New shortcut").subtitle("Not saved yet").build();
-        let parts = RowParts::new(row.clone(), None);
-        let (st, p) = (self.clone(), parts.clone());
-        super::widgets::lazy_rows(&row, move |_| edit_form(&st, &p, None));
-        self.new_group.add(&row);
-        self.new_group.set_visible(true);
-        row.set_expanded(true);
-        *self.new_row.borrow_mut() = Some(parts);
-    }
-
-    /// Remove the unsaved new shortcut, if any.
-    fn close_new(&self) {
-        if let Some(p) = self.new_row.borrow_mut().take() {
-            self.new_group.remove(&p.row);
-        }
-        self.new_group.set_visible(false);
     }
 
     fn filter(&self) {
@@ -533,6 +450,13 @@ impl PageState {
 
 fn hay_for(b: &Bind) -> String {
     format!("{} {} {}", b.key, b.title(), b.action).to_lowercase()
+}
+
+/// A shortcut row's title and subtitle.
+fn set_text(row: &adw::ActionRow, b: &Bind) {
+    row.set_title(&glib::markup_escape_text(&b.title()));
+    let sub = if b.prop("hotkey-overlay-title").is_some() { b.action.as_str() } else { "" };
+    row.set_subtitle(&glib::markup_escape_text(sub));
 }
 
 pub fn keycaps(key: &str) -> gtk::Box {
@@ -605,31 +529,30 @@ fn quote_args(argv: &[String]) -> String {
     argv.iter().map(|a| kdl::quote(a)).collect::<Vec<_>>().join(" ")
 }
 
-/// The editing form inside a shortcut's expander (None = a new shortcut).
-fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>) {
+fn edit_dialog(state: &Rc<PageState>, existing: Option<Bind>) {
     let ctx = &state.ctx;
-    let row = &parts.row;
-    // Rows go through `add` so a refresh can remove them again.
-    let add = |w: gtk::Widget| {
-        row.add_row(&w);
-        parts.form.borrow_mut().push(w);
-    };
-    let is_new = existing.is_none();
+    let dialog = adw::Dialog::builder()
+        .title(if existing.is_some() { "Edit Shortcut" } else { "Add Shortcut" })
+        .content_width(520)
+        .build();
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::builder().show_end_title_buttons(false).show_start_title_buttons(false).build();
+    let cancel = gtk::Button::with_label("Cancel");
     let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).build();
-    let discard = gtk::Button::with_label("Discard");
-    save.set_sensitive(is_new);
-    discard.set_sensitive(is_new);
-    let dirty: Rc<dyn Fn()> = {
-        let (save, discard) = (save.clone(), discard.clone());
-        Rc::new(move || {
-            save.set_sensitive(true);
-            discard.set_sensitive(true);
-        })
-    };
+    header.pack_start(&cancel);
+    header.pack_end(&save);
+    toolbar.add_top_bar(&header);
+
+    let page = adw::PreferencesPage::new();
+    toolbar.set_content(Some(&page));
+    dialog.set_child(Some(&toolbar));
 
     // ── Keys ──
+    let keys_group = adw::PreferencesGroup::builder()
+        .title("Shortcut")
+        .description("Record a key combination, or type one (e.g. Mod+Shift+Return, Mod+WheelScrollDown)")
+        .build();
     let keys = adw::EntryRow::builder().title("Keys").build();
-    keys.set_tooltip_text(Some("Record a key combination, or type one (e.g. Mod+Shift+Return, Mod+WheelScrollDown)"));
     let record = gtk::Button::builder()
         .icon_name("media-record-symbolic")
         .tooltip_text("Record shortcut")
@@ -642,15 +565,14 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
         .wrap(true)
         .css_classes(["error", "caption"])
         .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(12)
-        .margin_end(12)
         .visible(false)
         .build();
-    add(keys.clone().upcast());
-    add(conflict.clone().upcast());
+    keys_group.add(&keys);
+    keys_group.add(&conflict);
+    page.add(&keys_group);
 
     // ── Action ──
+    let action_group = adw::PreferencesGroup::builder().title("Action").build();
     let mut labels: Vec<String> = ACTIONS
         .iter()
         .map(|(n, a)| match a {
@@ -670,10 +592,12 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
         "string",
     )));
     let arg_row = adw::EntryRow::builder().title("Command").build();
-    add(action_row.clone().upcast());
-    add(arg_row.clone().upcast());
+    action_group.add(&action_row);
+    action_group.add(&arg_row);
+    page.add(&action_group);
 
     // ── Options ──
+    let opts = adw::PreferencesGroup::builder().title("Options").build();
     let title_row = adw::EntryRow::builder().title("Title in hotkey overlay (optional)").build();
     let locked = adw::SwitchRow::builder().title("Works on the lock screen").build();
     let repeat = adw::SwitchRow::builder().title("Repeat while held").active(true).build();
@@ -685,11 +609,12 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
     let cooldown = adw::SpinRow::with_range(0.0, 10_000.0, 10.0);
     cooldown.set_title("Cooldown (ms)");
     cooldown.set_subtitle("Minimum time between triggers; useful for scroll wheel binds");
-    add(title_row.clone().upcast());
-    add(locked.clone().upcast());
-    add(repeat.clone().upcast());
-    add(inhibit.clone().upcast());
-    add(cooldown.clone().upcast());
+    opts.add(&title_row);
+    opts.add(&locked);
+    opts.add(&repeat);
+    opts.add(&inhibit);
+    opts.add(&cooldown);
+    page.add(&opts);
 
     // Fill from the existing bind.
     let custom_idx = ACTIONS.len() as u32;
@@ -787,22 +712,6 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
         });
     }
 
-    // Any edit enables Save/Discard (connected after filling in values).
-    for e in [&keys, &arg_row, &title_row] {
-        let d = dirty.clone();
-        e.connect_changed(move |_| d());
-    }
-    for sw in [&locked, &repeat, &inhibit] {
-        let d = dirty.clone();
-        sw.connect_active_notify(move |_| d());
-    }
-    {
-        let d = dirty.clone();
-        cooldown.connect_value_notify(move |_| d());
-        let d = dirty.clone();
-        action_row.connect_selected_notify(move |_| d());
-    }
-
     // Conflict detection.
     let data = Rc::new(collect(ctx));
     let find_conflict = {
@@ -837,10 +746,11 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
         let recording = recording.clone();
         let window = ctx.window.clone();
         let keys = keys.clone();
+        let dialog = dialog.clone();
         let record = record.clone();
         Rc::new(move |restore: bool| {
             if let Some((ctrl, prev)) = recording.borrow_mut().take() {
-                window.remove_controller(&ctrl);
+                dialog.remove_controller(&ctrl);
                 if restore {
                     keys.set_text(&prev);
                 }
@@ -856,6 +766,7 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
         let recording = recording.clone();
         let window = ctx.window.clone();
         let keys = keys.clone();
+        let dialog = dialog.clone();
         let stop = stop_recording.clone();
         record.connect_clicked(move |btn| {
             if recording.borrow().is_some() {
@@ -891,68 +802,47 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
                 }
                 glib::Propagation::Stop
             });
-            // Listen on the whole window, ahead of other widgets.
-            window.add_controller(ctrl.clone());
+            dialog.add_controller(ctrl.clone());
             *recording.borrow_mut() = Some((ctrl, prev));
         });
     }
     {
-        // Stop recording when the row is collapsed or goes away.
         let stop = stop_recording.clone();
-        let h1 = row.connect_expanded_notify(move |r| {
-            if !r.is_expanded() {
-                stop(true);
-            }
-        });
-        let stop = stop_recording.clone();
-        let h2 = row.connect_unmap(move |_| stop(true));
-        parts.handlers.borrow_mut().extend([h1, h2]);
+        dialog.connect_closed(move |_| stop(false));
     }
 
-    // ── Actions ──
-    let actions = gtk::Box::builder().spacing(6).margin_top(12).margin_bottom(12).margin_start(12).margin_end(12).build();
-    let remove = gtk::Button::builder()
-        .label(if is_new { "Cancel" } else { "Delete Shortcut" })
-        .css_classes(["destructive-action"])
-        .hexpand(true)
-        .halign(gtk::Align::Start)
-        .build();
-    actions.append(&remove);
-    if !is_new {
-        actions.append(&discard);
-    }
-    actions.append(&save);
-    add(actions.clone().upcast());
-    {
-        let (st, parts) = (state.clone(), parts.clone());
-        let key = existing.as_ref().map(|b| b.key.clone());
-        remove.connect_clicked(move |_| match key.clone() {
-            None => st.close_new(),
-            Some(key) => {
-                let (st2, parts) = (st.clone(), parts.clone());
-                st.ctx.apply(move |s| s.set_node(&["binds", &key], None), move |ok| {
-                    if ok {
-                        st2.ctx.toast("Shortcut deleted");
-                        st2.remove_parts(&parts);
-                    }
-                });
-            }
+    // Delete.
+    if let Some(b) = &existing {
+        let del_group = adw::PreferencesGroup::new();
+        let del = adw::ButtonRow::builder().title("Delete Shortcut").css_classes(["destructive-action"]).build();
+        let st = state.clone();
+        let key = b.key.clone();
+        let dialog2 = dialog.clone();
+        del.connect_activated(move |_| {
+            let key = key.clone();
+            let (st2, dialog2) = (st.clone(), dialog2.clone());
+            let k2 = key.clone();
+            st.ctx.apply(move |s| s.set_node(&["binds", &key], None), move |ok| {
+                if ok {
+                    st2.ctx.toast("Shortcut deleted");
+                    dialog2.close();
+                    st2.remove_row(&k2);
+                }
+            });
         });
+        del_group.add(&del);
+        page.add(&del_group);
     }
+
     {
-        // Discard: rebuild just this form from the saved bind.
-        let (st, parts) = (state.clone(), parts.clone());
-        discard.connect_clicked(move |_| {
-            let b = parts.bind.borrow().clone();
-            match b {
-                Some(b) => st.refresh(&parts, b),
-                None => st.close_new(),
-            }
+        let dialog = dialog.clone();
+        cancel.connect_clicked(move |_| {
+            dialog.close();
         });
     }
     {
         let st = state.clone();
-        let parts = parts.clone();
+        let dialog2 = dialog.clone();
         save.connect_clicked(move |_| {
             let key = keys.text().trim().to_string();
             if key.is_empty() {
@@ -1033,13 +923,14 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
             let conflict = find_conflict(&key);
             let do_save = {
                 let st = st.clone();
-                let parts = parts.clone();
+                let dialog2 = dialog2.clone();
                 let existing_key = existing.as_ref().map(|b| b.key.clone());
                 let key = key.clone();
                 move |conflict: Option<Bind>| {
                     let (existing_key, key, text) = (existing_key.clone(), key.clone(), text.clone());
-                    let (st2, parts) = (st.clone(), parts.clone());
-                    let saved_key = key.clone();
+                    let (st2, dialog2) = (st.clone(), dialog2.clone());
+                    let old_key = existing_key.clone();
+                    let new_key = key.clone();
                     let replaced = conflict.as_ref().map(|c| c.key.clone());
                     st.ctx.apply(move |s| {
                         let mut edits: Vec<(Vec<&str>, Option<String>)> = Vec::new();
@@ -1055,7 +946,8 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
                     }, move |ok| {
                         if ok {
                             st2.ctx.toast("Shortcut saved");
-                            st2.after_save(&parts, &saved_key, replaced);
+                            dialog2.close();
+                            st2.after_save(old_key.as_deref(), &new_key, replaced.as_deref());
                         }
                     });
                 }
@@ -1075,12 +967,13 @@ fn edit_form(state: &Rc<PageState>, parts: &Rc<RowParts>, existing: Option<Bind>
                             do_save(Some(c.clone()));
                         }
                     });
-                    alert.present(Some(&st.ctx.window));
+                    alert.present(Some(&dialog2));
                 }
             }
         });
     }
 
+    dialog.present(Some(&ctx.window));
 }
 
 #[cfg(test)]
