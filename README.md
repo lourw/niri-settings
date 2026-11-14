@@ -63,7 +63,7 @@ cargo run --release
 - **Never broken:** every change is checked with `niri validate` before it's written. If niri rejects it, the change is refused or rolled back and you get an error dialog.
 - **No clobbering:** files are re-read from disk before every edit, so changes you make in a text editor while the app is open are kept. Use **Reload From Disk** (the refresh button) to update what the app shows.
 - **Backups:** before a file is changed for the first time in a session, the original is copied to `~/.local/state/niri-settings/backups/<timestamp>/`. **Open Backups Folder** in the menu takes you there.
-- **Live reload:** niri picks up changes immediately. The app also runs `niri msg action load-config-file` to make sure.
+- **Live reload:** niri watches its config, including included files, and picks up changes immediately.
 
 ## Development
 
