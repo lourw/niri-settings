@@ -24,6 +24,8 @@ pub struct Item {
     pub node: Node,
     /// Source text when read, to detect edits made elsewhere.
     pub src: String,
+    /// Leading whitespace of the node's line.
+    pub indent: String,
 }
 
 pub struct ConfigStore {
@@ -177,7 +179,13 @@ impl ConfigStore {
         let mut out = Vec::new();
         for f in &self.files {
             for (index, n) in f.doc.find_all(name).enumerate() {
-                out.push(Item { file: f.path.clone(), index, node: n.clone(), src: f.doc.text[n.span()].to_string() });
+                out.push(Item {
+                    file: f.path.clone(),
+                    index,
+                    node: n.clone(),
+                    src: f.doc.text[n.span()].to_string(),
+                    indent: kdl::line_indent(&f.doc.text, n.start),
+                });
             }
         }
         out
@@ -451,6 +459,33 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+/// For tests: a copy of the user's real config tree under target/<name>.
+/// None when there's no config or no niri to validate with.
+#[cfg(test)]
+pub fn test_copy_of_real_config(name: &str) -> Option<(ConfigStore, PathBuf)> {
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                copy_dir(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let src = home().join(".config/niri");
+    if !src.join("config.kdl").exists() || Command::new("niri").arg("--version").output().is_err() {
+        return None;
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    copy_dir(&src, &dir);
+    let mut s = ConfigStore::load_from(dir.join("config.kdl")).unwrap();
+    s.backup_dir = dir.join("backups");
+    Some((s, dir))
 }
 
 #[cfg(test)]

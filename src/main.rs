@@ -35,6 +35,7 @@ const PAGES: &[PageDef] = &[
     PageDef { id: "displays", title: "Displays", icon: "video-display-symbolic", build: |c| ui::displays::page(c).upcast() },
     PageDef { id: "layout", title: "Layout", icon: "view-grid-symbolic", build: |c| ui::layout::page(c).upcast() },
     PageDef { id: "appearance", title: "Appearance", icon: "preferences-desktop-appearance-symbolic", build: |c| ui::appearance::page(c).upcast() },
+    PageDef { id: "rules", title: "Window Rules", icon: "preferences-system-windows-symbolic", build: |c| ui::rules::page(c).upcast() },
     PageDef { id: "general", title: "Focus & Cursor", icon: "find-location-symbolic", build: |c| ui::general::page(c).upcast() },
     PageDef { id: "startup", title: "Startup Apps", icon: "system-run-symbolic", build: |c| ui::startup::page(c).upcast() },
     PageDef { id: "shortcuts", title: "Shortcuts", icon: "preferences-desktop-keyboard-shortcuts-symbolic", build: ui::keybinds::page },
