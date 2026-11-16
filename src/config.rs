@@ -519,11 +519,16 @@ mod tests {
 
         let input_before = std::fs::read_to_string(dir.join("cfg/input.kdl")).unwrap();
 
-        // Flag on/off in an existing section.
-        s.set_flag(&["input", "touchpad", "dwt"], true).unwrap();
-        assert!(s.flag(&["input", "touchpad", "dwt"]));
-        s.set_flag(&["input", "touchpad", "dwt"], false).unwrap();
-        assert!(!s.flag(&["input", "touchpad", "dwt"]));
+        // Flag on/off in an existing section. Use a flag the real config
+        // doesn't already set, or "off" would delete the user's line.
+        let flag = ["dwt", "dwtp", "disabled-on-external-mouse", "left-handed"]
+            .into_iter()
+            .find(|f| !s.flag(&["input", "touchpad", f]))
+            .expect("some touchpad flag is unset");
+        s.set_flag(&["input", "touchpad", flag], true).unwrap();
+        assert!(s.flag(&["input", "touchpad", flag]));
+        s.set_flag(&["input", "touchpad", flag], false).unwrap();
+        assert!(!s.flag(&["input", "touchpad", flag]));
 
         // Values, including creating a missing section.
         s.set_value(&["input", "mouse", "accel-speed"], Some(Value::Float(-0.35))).unwrap();
